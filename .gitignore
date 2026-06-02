@@ -1,0 +1,23 @@
+# Go build outputs
+/bin/
+/dist/
+*.test
+*.out
+
+# Env files
+.env
+.env.*
+
+# JetBrains IDE
+.idea/
+*.iml
+
+# VS Code
+.vscode/
+
+# OS
+.DS_Store
+
+# Logs
+*.log
+EOF
