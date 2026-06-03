@@ -7,6 +7,13 @@
 # Env files
 .env
 .env.*
+!.env.example
+
+# local config files
+configs/config.local.yaml
+
+# Private docs
+private-docs/
 
 # JetBrains IDE
 .idea/
@@ -20,4 +27,3 @@
 
 # Logs
 *.log
-EOFprivate-docs/

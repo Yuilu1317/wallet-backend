@@ -1,0 +1,21 @@
+app:
+  env: dev
+  http_port: "8081"
+
+database:
+  dsn: "${DATABASE_DSN}"
+
+ethereum:
+  chain_id: 11155111
+  confirmation_depth: 12
+  min_deposit_wei: "1"
+
+scanner:
+  name: native_eth_deposit_scanner
+  start_block: 0
+  batch_size: 10
+  poll_interval_seconds: 5
+
+explorer:
+  base_url: "http://localhost:8080"
+  timeout_seconds: 5
