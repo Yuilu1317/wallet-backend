@@ -1,10 +1,13 @@
 package main
 
 import (
+	"context"
 	"log"
 	"os"
+	"os/signal"
+	"syscall"
 
-	"github.com/Yuilu1317/wallet-backend/internal/config"
+	"github.com/Yuilu1317/wallet-backend/internal/app"
 	"github.com/joho/godotenv"
 )
 
@@ -12,20 +15,30 @@ func main() {
 	if err := godotenv.Load(); err != nil {
 		log.Printf("load .env skipped: %v", err)
 	}
+
 	configPath := os.Getenv("CONFIG_PATH")
 	if configPath == "" {
 		configPath = "configs/config.local.yaml"
 	}
-	cfg, err := config.Load(configPath)
+
+	ctx, stop := signal.NotifyContext(
+		context.Background(),
+		os.Interrupt,
+		syscall.SIGTERM)
+	defer stop()
+
+	application, err := app.New(configPath)
 	if err != nil {
-		log.Fatalf("load config: %v", err)
+		log.Fatalf("initialize app: %v", err)
 	}
-	log.Printf(
-		"config loaded: env=%s http_port=%s chain_id=%d scanner=%s explorer=%s",
-		cfg.App.Env,
-		cfg.App.HTTPPort,
-		cfg.Ethereum.ChainID,
-		cfg.Scanner.Name,
-		cfg.Explorer.BaseURL,
-	)
+
+	defer func() {
+		if err := application.Close(); err != nil {
+			log.Printf("close app: %v", err)
+		}
+	}()
+
+	if err := application.Run(ctx); err != nil {
+		log.Fatalf("run app: %v", err)
+	}
 }
