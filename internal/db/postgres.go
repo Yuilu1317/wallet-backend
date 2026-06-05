@@ -12,6 +12,11 @@ import (
 	"gorm.io/gorm/logger"
 )
 
+// OpenPostgres opens a PostgreSQL connection through GORM, configures the
+// underlying database/sql connection pool, and verifies connectivity with Ping.
+//
+// It does not run migrations or create tables. Database schema changes are
+// managed by SQL migration files under the migrations directory.
 func OpenPostgres(dsn string) (*gorm.DB, error) {
 	if strings.TrimSpace(dsn) == "" {
 		return nil, fmt.Errorf("database dsn is required")
@@ -45,6 +50,11 @@ func OpenPostgres(dsn string) (*gorm.DB, error) {
 	return gormDB, nil
 }
 
+// Close closes the underlying database/sql connection pool used by GORM.
+//
+// It only releases the current application's database connections. It does not
+// stop the PostgreSQL server itself. Passing nil is treated as a no-op so that
+// shutdown code can call Close safely even when the database was not initialized.
 func Close(gormDB *gorm.DB) error {
 	if gormDB == nil {
 		return nil

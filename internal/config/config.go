@@ -78,15 +78,15 @@ func (c *Config) Validate() error {
 		return err
 	}
 
-	if c.Ethereum.ChainID <= 0 {
-		return fmt.Errorf("ethereum.chain_id must be positive")
+	if err := validatePositiveInt64("ethereum.chain_id", c.Ethereum.ChainID); err != nil {
+		return err
 	}
 
-	if c.Ethereum.ConfirmationDepth <= 0 {
-		return fmt.Errorf("ethereum.confirmation_depth must be positive")
+	if err := validatePositiveInt64("ethereum.confirmation_depth", c.Ethereum.ConfirmationDepth); err != nil {
+		return err
 	}
 
-	if err := validateNonNegativeIntegerString("ethereum.min_deposit_wei", c.Ethereum.MinDepositWei); err != nil {
+	if err := validatePositiveIntegerString("ethereum.min_deposit_wei", c.Ethereum.MinDepositWei); err != nil {
 		return err
 	}
 
@@ -94,24 +94,24 @@ func (c *Config) Validate() error {
 		return err
 	}
 
-	if c.Scanner.StartBlock < 0 {
-		return fmt.Errorf("scanner.start_block must be non-negative")
+	if err := validateNonNegativeInt64("scanner.start_block", c.Scanner.StartBlock); err != nil {
+		return err
 	}
 
-	if c.Scanner.BatchSize <= 0 {
-		return fmt.Errorf("scanner.batch_size must be positive")
+	if err := validatePositiveInt("scanner.batch_size", c.Scanner.BatchSize); err != nil {
+		return err
 	}
 
-	if c.Scanner.PollIntervalSeconds <= 0 {
-		return fmt.Errorf("scanner.poll_interval_seconds must be positive")
+	if err := validatePositiveInt("scanner.poll_interval_seconds", c.Scanner.PollIntervalSeconds); err != nil {
+		return err
 	}
 
 	if err := validateRequiredString("explorer.base_url", c.Explorer.BaseURL); err != nil {
 		return err
 	}
 
-	if c.Explorer.TimeoutSeconds <= 0 {
-		return fmt.Errorf("explorer.timeout_seconds must be positive")
+	if err := validatePositiveInt("explorer.timeout_seconds", c.Explorer.TimeoutSeconds); err != nil {
+		return err
 	}
 
 	return nil
@@ -124,7 +124,28 @@ func validateRequiredString(name, value string) error {
 	return nil
 }
 
-func validateNonNegativeIntegerString(name, value string) error {
+func validatePositiveInt64(name string, value int64) error {
+	if value <= 0 {
+		return fmt.Errorf("%s must be positive", name)
+	}
+	return nil
+}
+
+func validateNonNegativeInt64(name string, value int64) error {
+	if value < 0 {
+		return fmt.Errorf("%s must be non-negative", name)
+	}
+	return nil
+}
+
+func validatePositiveInt(name string, value int) error {
+	if value <= 0 {
+		return fmt.Errorf("%s must be positive", name)
+	}
+	return nil
+}
+
+func validatePositiveIntegerString(name, value string) error {
 	value = strings.TrimSpace(value)
 	if value == "" {
 		return fmt.Errorf("%s is required", name)
@@ -132,8 +153,12 @@ func validateNonNegativeIntegerString(name, value string) error {
 
 	for _, ch := range value {
 		if ch < '0' || ch > '9' {
-			return fmt.Errorf("%s must be a non-negative integer string", name)
+			return fmt.Errorf("%s must be a positive integer string", name)
 		}
+	}
+
+	if value == "0" {
+		return fmt.Errorf("%s must be positive", name)
 	}
 
 	return nil

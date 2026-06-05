@@ -15,9 +15,6 @@ configs/config.local.yaml
 # Private docs
 private-docs/
 
-# Prevate note
-main_note.md
-
 # JetBrains IDE
 .idea/
 *.iml
