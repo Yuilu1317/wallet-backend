@@ -31,13 +31,16 @@ func (r *DepositAddressRepo) FindActiveByChainIDAndAddressLower(
 	var address model.DepositAddress
 
 	if err := r.db.WithContext(ctx).
-		Where("chain_id = ? ", chainID).
+		Where("chain_id = ?", chainID).
 		Where("address_lower = ?", addressLower).
 		Where("status = ?", model.DepositAddressStatusActive).
 		Take(&address).
 		Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, false, nil
+		}
+		if mapped := mapDBError(err); mapped != nil {
+			return nil, false, fmt.Errorf("find active deposit address: %w", mapped)
 		}
 		return nil, false, fmt.Errorf("find active deposit address: %w", err)
 	}

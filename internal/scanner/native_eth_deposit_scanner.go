@@ -3,6 +3,7 @@ package scanner
 import (
 	"context"
 	"fmt"
+	"log"
 	"math/big"
 	"sort"
 	"strings"
@@ -249,9 +250,20 @@ func (s *NativeETHDepositScanner) processTransaction(
 		Status:           model.DepositStatusConfirming,
 		ReceiptStatus:    tx.ReceiptStatus,
 	}
-	_, err = s.depositRepo.CreateConfirmingDepositIdempotently(ctx, deposit)
+	created, err := s.depositRepo.CreateConfirmingDepositIdempotently(ctx, deposit)
 	if err != nil {
 		return fmt.Errorf("create confirming deposit idempotently: %w", err)
+	}
+	if created {
+		log.Printf(
+			"native eth deposit created: chain_id=%d user_id=%d deposit_address_id=%d tx_hash=%s block_number=%d amount_wei=%s",
+			deposit.ChainID,
+			deposit.UserID,
+			deposit.DepositAddressID,
+			deposit.TxHash,
+			deposit.BlockNumber,
+			deposit.AmountWei,
+		)
 	}
 
 	return nil

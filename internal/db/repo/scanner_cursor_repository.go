@@ -31,12 +31,15 @@ func (r *ScannerCursorRepo) GetByChainIDAndScannerName(
 	var cursor model.WalletScannerCursor
 
 	if err := r.db.WithContext(ctx).
-		Where("chain_id = ? ", chainID).
+		Where("chain_id = ?", chainID).
 		Where("scanner_name = ?", scannerName).
 		Take(&cursor).
 		Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, false, nil
+		}
+		if mapped := mapDBError(err); mapped != nil {
+			return nil, false, fmt.Errorf("get scanner cursor: %w", mapped)
 		}
 		return nil, false, fmt.Errorf("get scanner cursor: %w", err)
 	}
@@ -70,6 +73,9 @@ func (r *ScannerCursorRepo) UpsertAfterBlockProcessed(
 		Create(cursor)
 
 	if result.Error != nil {
+		if mapped := mapDBError(result.Error); mapped != nil {
+			return fmt.Errorf("upsert scanner cursor after block processed: %w", mapped)
+		}
 		return fmt.Errorf("upsert scanner cursor after block processed: %w", result.Error)
 	}
 	return nil

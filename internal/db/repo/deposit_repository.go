@@ -17,6 +17,9 @@ func NewDepositRepo(db *gorm.DB) *DepositRepo {
 	return &DepositRepo{db: db}
 }
 
+// CreateConfirmingDepositIdempotently inserts a confirming deposit once.
+// The idempotency key is chain_id + tx_hash. If the deposit already exists,
+// it returns created=false and nil error.
 func (r *DepositRepo) CreateConfirmingDepositIdempotently(
 	ctx context.Context,
 	deposit *model.Deposit,
@@ -40,6 +43,9 @@ func (r *DepositRepo) CreateConfirmingDepositIdempotently(
 		Create(deposit)
 
 	if result.Error != nil {
+		if mapped := mapDBError(result.Error); mapped != nil {
+			return false, fmt.Errorf("create confirming deposit idempotently: %w", mapped)
+		}
 		return false, fmt.Errorf("create confirming deposit idempotently: %w", result.Error)
 	}
 
