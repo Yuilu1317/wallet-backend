@@ -7,21 +7,21 @@ type ListCompletedBlocksRequest struct {
 }
 
 type ListCompletedBlocksResponse struct {
-	ChainID int64
-	Blocks  []CompletedBlock
+	ChainID int64            `json:"chain_id"`
+	Blocks  []CompletedBlock `json:"blocks"`
 }
 
 type CompletedBlock struct {
-	Number       int64
-	Hash         string
-	ParentHash   string
-	Transactions []CompletedTransaction
+	Number       int64                  `json:"number"`
+	Hash         string                 `json:"hash"`
+	ParentHash   string                 `json:"parent_hash"`
+	Transactions []CompletedTransaction `json:"transactions"`
 }
 
 type CompletedTransaction struct {
-	TxHash        string
-	FromAddress   string
-	ToAddress     string
-	AmountWei     string
-	ReceiptStatus int16
+	TxHash        string `json:"tx_hash"`
+	FromAddress   string `json:"from_address"`
+	ToAddress     string `json:"to_address"`
+	AmountWei     string `json:"amount_wei"`
+	ReceiptStatus int16  `json:"receipt_status"`
 }
