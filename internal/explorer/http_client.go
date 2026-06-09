@@ -57,7 +57,11 @@ func (c *HTTPClient) ListCompletedBlocks(
 
 	resp, err := c.client.Do(httpReq)
 	if err != nil {
-		return nil, fmt.Errorf("request completed blocks: %w", err)
+		return nil, fmt.Errorf("request completed blocks: chain_id=%d from_block=%d limit=%d: %w",
+			req.ChainID,
+			req.FromBlock,
+			req.Limit,
+			err)
 	}
 	defer resp.Body.Close()
 
