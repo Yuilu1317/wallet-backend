@@ -13,18 +13,16 @@ func newScannerForTest(
 	t *testing.T,
 	cfg Config,
 	explorerClient explorer.Client,
-	depositAddressRepo DepositAddressRepository,
-	depositRepo DepositRepository,
 	cursorRepo CursorRepository,
+	txRunner TransactionRunner,
 ) *NativeETHDepositScanner {
 	t.Helper()
 
 	scanner, err := NewNativeETHDepositScanner(
 		cfg,
 		explorerClient,
-		depositAddressRepo,
-		depositRepo,
 		cursorRepo,
+		txRunner,
 	)
 	if err != nil {
 		t.Fatalf("new native eth deposit scanner: %v", err)
@@ -146,6 +144,39 @@ func (f *fakeCursorRepo) UpsertAfterBlockProcessed(
 	return nil
 }
 
+type fakeTransactionRunner struct {
+	repos Repositories
+	err   error
+	calls int
+}
+
+func newFakeTransactionRunner(
+	depositAddressRepo DepositAddressRepository,
+	depositRepo DepositRepository,
+	cursorRepo CursorRepository,
+) *fakeTransactionRunner {
+	return &fakeTransactionRunner{
+		repos: Repositories{
+			DepositAddressRepo: depositAddressRepo,
+			DepositRepo:        depositRepo,
+			CursorRepo:         cursorRepo,
+		},
+	}
+}
+
+func (f *fakeTransactionRunner) WithinTransaction(
+	ctx context.Context,
+	fn func(repos Repositories) error,
+) error {
+	f.calls++
+
+	if f.err != nil {
+		return f.err
+	}
+
+	return fn(f.repos)
+}
+
 func TestNativeETHDepositScanner_ScanOnce_WithoutCursorRequestsStartBlockAndUpdatesCursor(t *testing.T) {
 	cfg := validScannerConfig()
 
@@ -166,7 +197,13 @@ func TestNativeETHDepositScanner_ScanOnce_WithoutCursorRequestsStartBlockAndUpda
 		found: false,
 	}
 
-	scanner := newScannerForTest(t, cfg, explorerClient, &fakeDepositAddressRepo{}, &fakeDepositRepo{}, cursorRepo)
+	txRunner := newFakeTransactionRunner(
+		&fakeDepositAddressRepo{},
+		&fakeDepositRepo{},
+		cursorRepo,
+	)
+
+	scanner := newScannerForTest(t, cfg, explorerClient, cursorRepo, txRunner)
 
 	err := scanner.ScanOnce(context.Background())
 	if err != nil {
@@ -184,6 +221,10 @@ func TestNativeETHDepositScanner_ScanOnce_WithoutCursorRequestsStartBlockAndUpda
 
 	if req.Limit != cfg.BatchSize {
 		t.Fatalf("expected limit %d, got %d", cfg.BatchSize, req.Limit)
+	}
+
+	if txRunner.calls != 1 {
+		t.Fatalf("expected 1 transaction call, got %d", txRunner.calls)
 	}
 
 	if len(cursorRepo.upserts) != 1 {
@@ -221,7 +262,13 @@ func TestNativeETHDepositScanner_ScanOnce_WithCursorRequestsNextBlock(t *testing
 		found: true,
 	}
 
-	scanner := newScannerForTest(t, cfg, explorerClient, &fakeDepositAddressRepo{}, &fakeDepositRepo{}, cursorRepo)
+	txRunner := newFakeTransactionRunner(
+		&fakeDepositAddressRepo{},
+		&fakeDepositRepo{},
+		cursorRepo,
+	)
+
+	scanner := newScannerForTest(t, cfg, explorerClient, cursorRepo, txRunner)
 
 	err := scanner.ScanOnce(context.Background())
 	if err != nil {
@@ -231,6 +278,10 @@ func TestNativeETHDepositScanner_ScanOnce_WithCursorRequestsNextBlock(t *testing
 	req := explorerClient.requests[0]
 	if req.FromBlock != 101 {
 		t.Fatalf("expected from block 101, got %d", req.FromBlock)
+	}
+
+	if txRunner.calls != 1 {
+		t.Fatalf("expected 1 transaction call, got %d", txRunner.calls)
 	}
 
 	if len(cursorRepo.upserts) != 1 {
@@ -264,12 +315,21 @@ func TestNativeETHDepositScanner_ScanOnce_SortsBlocksAndProcessesSequentially(t 
 	}
 
 	cursorRepo := &fakeCursorRepo{}
+	txRunner := newFakeTransactionRunner(
+		&fakeDepositAddressRepo{},
+		&fakeDepositRepo{},
+		cursorRepo,
+	)
 
-	scanner := newScannerForTest(t, cfg, explorerClient, &fakeDepositAddressRepo{}, &fakeDepositRepo{}, cursorRepo)
+	scanner := newScannerForTest(t, cfg, explorerClient, cursorRepo, txRunner)
 
 	err := scanner.ScanOnce(context.Background())
 	if err != nil {
 		t.Fatalf("expected nil error, got %v", err)
+	}
+
+	if txRunner.calls != 2 {
+		t.Fatalf("expected 2 transaction calls, got %d", txRunner.calls)
 	}
 
 	if len(cursorRepo.upserts) != 2 {
@@ -307,8 +367,13 @@ func TestNativeETHDepositScanner_ScanOnce_MissingBlockReturnsError(t *testing.T)
 	}
 
 	cursorRepo := &fakeCursorRepo{}
+	txRunner := newFakeTransactionRunner(
+		&fakeDepositAddressRepo{},
+		&fakeDepositRepo{},
+		cursorRepo,
+	)
 
-	scanner := newScannerForTest(t, cfg, explorerClient, &fakeDepositAddressRepo{}, &fakeDepositRepo{}, cursorRepo)
+	scanner := newScannerForTest(t, cfg, explorerClient, cursorRepo, txRunner)
 
 	err := scanner.ScanOnce(context.Background())
 	if err == nil {
@@ -317,6 +382,18 @@ func TestNativeETHDepositScanner_ScanOnce_MissingBlockReturnsError(t *testing.T)
 
 	if !strings.Contains(err.Error(), "unexpected block number") {
 		t.Fatalf("expected unexpected block number error, got %q", err.Error())
+	}
+
+	if txRunner.calls != 1 {
+		t.Fatalf("expected 1 transaction call before missing block, got %d", txRunner.calls)
+	}
+
+	if len(cursorRepo.upserts) != 1 {
+		t.Fatalf("expected cursor upsert for processed block 100, got %d", len(cursorRepo.upserts))
+	}
+
+	if cursorRepo.upserts[0].LastScannedBlockNumber != 100 {
+		t.Fatalf("expected cursor block 100, got %d", cursorRepo.upserts[0].LastScannedBlockNumber)
 	}
 }
 
@@ -346,7 +423,13 @@ func TestNativeETHDepositScanner_ScanOnce_ParentHashMismatchReturnsError(t *test
 		found: true,
 	}
 
-	scanner := newScannerForTest(t, cfg, explorerClient, &fakeDepositAddressRepo{}, &fakeDepositRepo{}, cursorRepo)
+	txRunner := newFakeTransactionRunner(
+		&fakeDepositAddressRepo{},
+		&fakeDepositRepo{},
+		cursorRepo,
+	)
+
+	scanner := newScannerForTest(t, cfg, explorerClient, cursorRepo, txRunner)
 
 	err := scanner.ScanOnce(context.Background())
 	if err == nil {
@@ -355,6 +438,10 @@ func TestNativeETHDepositScanner_ScanOnce_ParentHashMismatchReturnsError(t *test
 
 	if !strings.Contains(err.Error(), "block continuity check failed") {
 		t.Fatalf("expected continuity error, got %q", err.Error())
+	}
+
+	if txRunner.calls != 0 {
+		t.Fatalf("expected no transaction call, got %d", txRunner.calls)
 	}
 
 	if len(cursorRepo.upserts) != 0 {
@@ -378,10 +465,10 @@ func TestNativeETHDepositScanner_ScanOnce_CreatesDepositForMatchingTransaction(t
 					ParentHash: "0xblock99",
 					Transactions: []explorer.CompletedTransaction{
 						{
-							TxHash:        "0xtx100",
+							TxHash:        " 0xTX100 ",
 							FromAddress:   "0xAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
 							ToAddress:     toAddress,
-							AmountWei:     "100",
+							AmountWei:     " 100 ",
 							ReceiptStatus: 1,
 						},
 					},
@@ -408,12 +495,17 @@ func TestNativeETHDepositScanner_ScanOnce_CreatesDepositForMatchingTransaction(t
 	}
 
 	cursorRepo := &fakeCursorRepo{}
+	txRunner := newFakeTransactionRunner(depositAddressRepo, depositRepo, cursorRepo)
 
-	scanner := newScannerForTest(t, cfg, explorerClient, depositAddressRepo, depositRepo, cursorRepo)
+	scanner := newScannerForTest(t, cfg, explorerClient, cursorRepo, txRunner)
 
 	err := scanner.ScanOnce(context.Background())
 	if err != nil {
 		t.Fatalf("expected nil error, got %v", err)
+	}
+
+	if txRunner.calls != 1 {
+		t.Fatalf("expected 1 transaction call, got %d", txRunner.calls)
 	}
 
 	if len(depositRepo.deposits) != 1 {
@@ -446,8 +538,20 @@ func TestNativeETHDepositScanner_ScanOnce_CreatesDepositForMatchingTransaction(t
 		t.Fatalf("expected to address %q, got %q", toAddressLower, got.ToAddress)
 	}
 
+	if got.AmountWei != "100" {
+		t.Fatalf("expected amount wei 100, got %q", got.AmountWei)
+	}
+
+	if got.FromAddress != "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" {
+		t.Fatalf("expected normalized from address, got %q", got.FromAddress)
+	}
+
 	if len(cursorRepo.upserts) != 1 {
 		t.Fatalf("expected 1 cursor upsert, got %d", len(cursorRepo.upserts))
+	}
+
+	if cursorRepo.upserts[0].LastScannedBlockNumber != 100 {
+		t.Fatalf("expected cursor block 100, got %d", cursorRepo.upserts[0].LastScannedBlockNumber)
 	}
 }
 
@@ -507,12 +611,17 @@ func TestNativeETHDepositScanner_ScanOnce_SkipsNonDepositTransactions(t *testing
 
 	depositRepo := &fakeDepositRepo{}
 	cursorRepo := &fakeCursorRepo{}
+	txRunner := newFakeTransactionRunner(depositAddressRepo, depositRepo, cursorRepo)
 
-	scanner := newScannerForTest(t, cfg, explorerClient, depositAddressRepo, depositRepo, cursorRepo)
+	scanner := newScannerForTest(t, cfg, explorerClient, cursorRepo, txRunner)
 
 	err := scanner.ScanOnce(context.Background())
 	if err != nil {
 		t.Fatalf("expected nil error, got %v", err)
+	}
+
+	if txRunner.calls != 1 {
+		t.Fatalf("expected 1 transaction call, got %d", txRunner.calls)
 	}
 
 	if len(depositRepo.deposits) != 0 {
@@ -550,16 +659,25 @@ func TestNativeETHDepositScanner_ScanOnce_InvalidAmountReturnsError(t *testing.T
 	}
 
 	cursorRepo := &fakeCursorRepo{}
+	txRunner := newFakeTransactionRunner(
+		&fakeDepositAddressRepo{},
+		&fakeDepositRepo{},
+		cursorRepo,
+	)
 
-	scanner := newScannerForTest(t, cfg, explorerClient, &fakeDepositAddressRepo{}, &fakeDepositRepo{}, cursorRepo)
+	scanner := newScannerForTest(t, cfg, explorerClient, cursorRepo, txRunner)
 
 	err := scanner.ScanOnce(context.Background())
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
 
-	if !strings.Contains(err.Error(), "compare amount wei") {
-		t.Fatalf("expected compare amount wei error, got %q", err.Error())
+	if !strings.Contains(err.Error(), "parse amount_wei") {
+		t.Fatalf("expected parse amount_wei error, got %q", err.Error())
+	}
+
+	if txRunner.calls != 1 {
+		t.Fatalf("expected 1 transaction call, got %d", txRunner.calls)
 	}
 
 	if len(cursorRepo.upserts) != 0 {
@@ -574,7 +692,14 @@ func TestNativeETHDepositScanner_ScanOnce_NilResponseReturnsError(t *testing.T) 
 		resp: nil,
 	}
 
-	scanner := newScannerForTest(t, cfg, explorerClient, &fakeDepositAddressRepo{}, &fakeDepositRepo{}, &fakeCursorRepo{})
+	cursorRepo := &fakeCursorRepo{}
+	txRunner := newFakeTransactionRunner(
+		&fakeDepositAddressRepo{},
+		&fakeDepositRepo{},
+		cursorRepo,
+	)
+
+	scanner := newScannerForTest(t, cfg, explorerClient, cursorRepo, txRunner)
 
 	err := scanner.ScanOnce(context.Background())
 	if err == nil {
@@ -583,6 +708,10 @@ func TestNativeETHDepositScanner_ScanOnce_NilResponseReturnsError(t *testing.T) 
 
 	if !strings.Contains(err.Error(), "list completed blocks returned nil response") {
 		t.Fatalf("expected nil response error, got %q", err.Error())
+	}
+
+	if txRunner.calls != 0 {
+		t.Fatalf("expected no transaction call, got %d", txRunner.calls)
 	}
 }
 
@@ -596,7 +725,14 @@ func TestNativeETHDepositScanner_ScanOnce_UnexpectedChainIDReturnsError(t *testi
 		},
 	}
 
-	scanner := newScannerForTest(t, cfg, explorerClient, &fakeDepositAddressRepo{}, &fakeDepositRepo{}, &fakeCursorRepo{})
+	cursorRepo := &fakeCursorRepo{}
+	txRunner := newFakeTransactionRunner(
+		&fakeDepositAddressRepo{},
+		&fakeDepositRepo{},
+		cursorRepo,
+	)
+
+	scanner := newScannerForTest(t, cfg, explorerClient, cursorRepo, txRunner)
 
 	err := scanner.ScanOnce(context.Background())
 	if err == nil {
@@ -606,65 +742,111 @@ func TestNativeETHDepositScanner_ScanOnce_UnexpectedChainIDReturnsError(t *testi
 	if !strings.Contains(err.Error(), "unexpected response chain_id") {
 		t.Fatalf("expected unexpected response chain_id error, got %q", err.Error())
 	}
+
+	if txRunner.calls != 0 {
+		t.Fatalf("expected no transaction call, got %d", txRunner.calls)
+	}
 }
 
-func TestIsAmountAtLeast(t *testing.T) {
+func TestNewNativeETHDepositScanner_InvalidMinDepositWeiReturnsError(t *testing.T) {
 	tests := []struct {
-		name    string
-		amount  string
-		min     string
-		want    bool
-		wantErr string
+		name          string
+		minDepositWei string
+		wantErr       string
 	}{
 		{
-			name:   "amount greater than min",
-			amount: "100",
-			min:    "10",
-			want:   true,
+			name:          "empty",
+			minDepositWei: "",
+			wantErr:       "scanner.min_deposit_wei is required",
 		},
 		{
-			name:   "amount equal min",
-			amount: "10",
-			min:    "10",
-			want:   true,
+			name:          "invalid integer",
+			minDepositWei: "abc",
+			wantErr:       "parse scanner.min_deposit_wei",
 		},
 		{
-			name:   "amount less than min",
-			amount: "9",
-			min:    "10",
-			want:   false,
+			name:          "zero",
+			minDepositWei: "0",
+			wantErr:       "value must be positive",
 		},
 		{
-			name:    "invalid amount",
-			amount:  "abc",
-			min:     "10",
-			wantErr: "invalid amount_wei",
-		},
-		{
-			name:    "negative amount",
-			amount:  "-1",
-			min:     "10",
-			wantErr: "amount_wei must be non-negative",
-		},
-		{
-			name:    "invalid min",
-			amount:  "10",
-			min:     "abc",
-			wantErr: "invalid min_wei",
-		},
-		{
-			name:    "zero min",
-			amount:  "10",
-			min:     "0",
-			wantErr: "min_wei must be positive",
+			name:          "negative",
+			minDepositWei: "-1",
+			wantErr:       "value must be positive",
 		},
 	}
 
 	for _, tt := range tests {
-		tt := tt
-
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := isAmountAtLeast(tt.amount, tt.min)
+			cfg := validScannerConfig()
+			cfg.MinDepositWei = tt.minDepositWei
+
+			cursorRepo := &fakeCursorRepo{}
+			txRunner := newFakeTransactionRunner(
+				&fakeDepositAddressRepo{},
+				&fakeDepositRepo{},
+				cursorRepo,
+			)
+
+			_, err := NewNativeETHDepositScanner(
+				cfg,
+				&fakeExplorerClient{},
+				cursorRepo,
+				txRunner,
+			)
+			if err == nil {
+				t.Fatal("expected error, got nil")
+			}
+
+			if !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("expected error to contain %q, got %q", tt.wantErr, err.Error())
+			}
+		})
+	}
+}
+
+func TestParsePositiveWei(t *testing.T) {
+	tests := []struct {
+		name    string
+		value   string
+		want    string
+		wantErr string
+	}{
+		{
+			name:  "positive",
+			value: "10",
+			want:  "10",
+		},
+		{
+			name:  "trim spaces",
+			value: " 10 ",
+			want:  "10",
+		},
+		{
+			name:    "empty",
+			value:   "",
+			wantErr: "value is required",
+		},
+		{
+			name:    "invalid",
+			value:   "abc",
+			wantErr: "value must be a base-10 integer",
+		},
+		{
+			name:    "zero",
+			value:   "0",
+			wantErr: "value must be positive",
+		},
+		{
+			name:    "negative",
+			value:   "-1",
+			wantErr: "value must be positive",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := parsePositiveWei(tt.value)
 
 			if tt.wantErr != "" {
 				if err == nil {
@@ -682,8 +864,74 @@ func TestIsAmountAtLeast(t *testing.T) {
 				t.Fatalf("expected nil error, got %v", err)
 			}
 
-			if got != tt.want {
-				t.Fatalf("expected %v, got %v", tt.want, got)
+			if got.String() != tt.want {
+				t.Fatalf("expected %q, got %q", tt.want, got.String())
+			}
+		})
+	}
+}
+
+func TestParseNonNegativeWei(t *testing.T) {
+	tests := []struct {
+		name    string
+		value   string
+		want    string
+		wantErr string
+	}{
+		{
+			name:  "positive",
+			value: "10",
+			want:  "10",
+		},
+		{
+			name:  "zero",
+			value: "0",
+			want:  "0",
+		},
+		{
+			name:  "trim spaces",
+			value: " 100 ",
+			want:  "100",
+		},
+		{
+			name:    "empty",
+			value:   "",
+			wantErr: "value is required",
+		},
+		{
+			name:    "invalid",
+			value:   "abc",
+			wantErr: "value must be a base-10 integer",
+		},
+		{
+			name:    "negative",
+			value:   "-1",
+			wantErr: "value must be non-negative",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := parseNonNegativeWei(tt.value)
+
+			if tt.wantErr != "" {
+				if err == nil {
+					t.Fatal("expected error, got nil")
+				}
+
+				if !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("expected error to contain %q, got %q", tt.wantErr, err.Error())
+				}
+
+				return
+			}
+
+			if err != nil {
+				t.Fatalf("expected nil error, got %v", err)
+			}
+
+			if got.String() != tt.want {
+				t.Fatalf("expected %q, got %q", tt.want, got.String())
 			}
 		})
 	}

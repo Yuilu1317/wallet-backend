@@ -48,49 +48,89 @@ type Config struct {
 	MinDepositWei string
 }
 
-type NativeETHDepositScanner struct {
-	cfg Config
+type Repositories struct {
+	DepositAddressRepo DepositAddressRepository
+	DepositRepo        DepositRepository
+	CursorRepo         CursorRepository
+}
 
-	explorerClient     explorer.Client
-	depositAddressRepo DepositAddressRepository
-	depositRepo        DepositRepository
-	cursorRepo         CursorRepository
+type TransactionRunner interface {
+	WithinTransaction(
+		ctx context.Context,
+		fn func(repos Repositories) error,
+	) error
+}
+
+type NativeETHDepositScanner struct {
+	cfg           Config
+	minDepositWei *big.Int
+
+	explorerClient explorer.Client
+	cursorRepo     CursorRepository
+	txRunner       TransactionRunner
 }
 
 func NewNativeETHDepositScanner(
 	cfg Config,
 	explorerClient explorer.Client,
-	depositAddressRepo DepositAddressRepository,
-	depositRepo DepositRepository,
 	cursorRepo CursorRepository,
+	txRunner TransactionRunner,
 ) (*NativeETHDepositScanner, error) {
 	if err := validateConfig(cfg); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("invalid config: %w", err)
+	}
+
+	minDepositWei, err := parsePositiveWei(cfg.MinDepositWei)
+	if err != nil {
+		return nil, fmt.Errorf("parse scanner.min_deposit_wei: %w", err)
 	}
 
 	if explorerClient == nil {
 		return nil, fmt.Errorf("explorer client is required")
 	}
 
-	if depositAddressRepo == nil {
-		return nil, fmt.Errorf("deposit address repo is required")
-	}
-
-	if depositRepo == nil {
-		return nil, fmt.Errorf("deposit repo is required")
-	}
-
 	if cursorRepo == nil {
 		return nil, fmt.Errorf("scanner cursor repo is required")
 	}
 
+	if txRunner == nil {
+		return nil, fmt.Errorf("transaction runner is required")
+	}
+
 	return &NativeETHDepositScanner{
-		cfg:                cfg,
-		explorerClient:     explorerClient,
-		depositAddressRepo: depositAddressRepo,
-		depositRepo:        depositRepo,
-		cursorRepo:         cursorRepo,
+		cfg:            cfg,
+		minDepositWei:  minDepositWei,
+		explorerClient: explorerClient,
+		cursorRepo:     cursorRepo,
+		txRunner:       txRunner,
 	}, nil
+}
+
+func parseWei(value string) (*big.Int, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nil, fmt.Errorf("value is required")
+	}
+
+	amount, ok := new(big.Int).SetString(value, 10)
+	if !ok {
+		return nil, fmt.Errorf("value must be a base-10 integer")
+	}
+
+	return amount, nil
+}
+
+func parsePositiveWei(value string) (*big.Int, error) {
+	amount, err := parseWei(value)
+	if err != nil {
+		return nil, err
+	}
+
+	if amount.Sign() <= 0 {
+		return nil, fmt.Errorf("value must be positive")
+	}
+
+	return amount, nil
 }
 
 func validateConfig(cfg Config) error {
@@ -174,16 +214,8 @@ func (s *NativeETHDepositScanner) processBlocks(
 				previousHash,
 			)
 		}
-		if err := s.processBlock(ctx, block); err != nil {
-			return fmt.Errorf("process block %d: %w", block.Number, err)
-		}
-		if err := s.cursorRepo.UpsertAfterBlockProcessed(ctx, &model.WalletScannerCursor{
-			ChainID:                s.cfg.ChainID,
-			ScannerName:            s.cfg.ScannerName,
-			LastScannedBlockNumber: block.Number,
-			LastScannedBlockHash:   block.Hash,
-		}); err != nil {
-			return fmt.Errorf("update scanner cursor after block %d: %w", block.Number, err)
+		if err := s.processBlockInTransaction(ctx, block); err != nil {
+			return fmt.Errorf("process block in transaction %d: %w", block.Number, err)
 		}
 		previousHash = block.Hash
 		expectedBlockNumber = block.Number + 1
@@ -191,12 +223,35 @@ func (s *NativeETHDepositScanner) processBlocks(
 	return nil
 }
 
-func (s *NativeETHDepositScanner) processBlock(
+func (s *NativeETHDepositScanner) processBlockInTransaction(
 	ctx context.Context,
 	block explorer.CompletedBlock,
 ) error {
+	return s.txRunner.WithinTransaction(ctx, func(repos Repositories) error {
+		if err := s.processBlock(ctx, repos, block); err != nil {
+			return fmt.Errorf("process block: %w", err)
+		}
+
+		if err := repos.CursorRepo.UpsertAfterBlockProcessed(ctx, &model.WalletScannerCursor{
+			ChainID:                s.cfg.ChainID,
+			ScannerName:            s.cfg.ScannerName,
+			LastScannedBlockNumber: block.Number,
+			LastScannedBlockHash:   block.Hash,
+		}); err != nil {
+			return fmt.Errorf("update scanner cursor: %w", err)
+		}
+
+		return nil
+	})
+}
+
+func (s *NativeETHDepositScanner) processBlock(
+	ctx context.Context,
+	repos Repositories,
+	block explorer.CompletedBlock,
+) error {
 	for _, tx := range block.Transactions {
-		if err := s.processTransaction(ctx, block, tx); err != nil {
+		if err := s.processTransaction(ctx, repos, block, tx); err != nil {
 			return fmt.Errorf("process transaction %s: %w", tx.TxHash, err)
 		}
 	}
@@ -205,18 +260,28 @@ func (s *NativeETHDepositScanner) processBlock(
 
 func (s *NativeETHDepositScanner) processTransaction(
 	ctx context.Context,
+	repos Repositories,
 	block explorer.CompletedBlock,
 	tx explorer.CompletedTransaction,
 ) error {
 	if tx.ReceiptStatus != 1 {
 		return nil
 	}
-
-	ok, err := isAmountAtLeast(tx.AmountWei, s.cfg.MinDepositWei)
-	if err != nil {
-		return fmt.Errorf("compare amount wei: %w", err)
+	txHash := strings.ToLower(strings.TrimSpace(tx.TxHash))
+	if txHash == "" {
+		return fmt.Errorf("tx_hash is required")
 	}
-	if !ok {
+
+	amountWei, err := parseNonNegativeWei(tx.AmountWei)
+	if err != nil {
+		return fmt.Errorf("parse amount_wei: tx_hash=%s amount_wei=%q: %w",
+			tx.TxHash,
+			tx.AmountWei,
+			err,
+		)
+	}
+
+	if amountWei.Cmp(s.minDepositWei) < 0 {
 		return nil
 	}
 
@@ -225,7 +290,7 @@ func (s *NativeETHDepositScanner) processTransaction(
 		return nil
 	}
 
-	depositAddress, found, err := s.depositAddressRepo.FindActiveByChainIDAndAddressLower(
+	depositAddress, found, err := repos.DepositAddressRepo.FindActiveByChainIDAndAddressLower(
 		ctx,
 		s.cfg.ChainID,
 		toAddressLower,
@@ -241,16 +306,16 @@ func (s *NativeETHDepositScanner) processTransaction(
 		UserID:           depositAddress.UserID,
 		ChainID:          s.cfg.ChainID,
 		DepositAddressID: depositAddress.ID,
-		TxHash:           tx.TxHash,
+		TxHash:           txHash,
 		BlockNumber:      block.Number,
 		BlockHash:        block.Hash,
 		FromAddress:      strings.ToLower(strings.TrimSpace(tx.FromAddress)),
 		ToAddress:        toAddressLower,
-		AmountWei:        tx.AmountWei,
+		AmountWei:        amountWei.String(),
 		Status:           model.DepositStatusConfirming,
 		ReceiptStatus:    tx.ReceiptStatus,
 	}
-	created, err := s.depositRepo.CreateConfirmingDepositIdempotently(ctx, deposit)
+	created, err := repos.DepositRepo.CreateConfirmingDepositIdempotently(ctx, deposit)
 	if err != nil {
 		return fmt.Errorf("create confirming deposit idempotently: %w", err)
 	}
@@ -269,21 +334,15 @@ func (s *NativeETHDepositScanner) processTransaction(
 	return nil
 }
 
-func isAmountAtLeast(amountWei string, minWei string) (bool, error) {
-	amount, ok := new(big.Int).SetString(strings.TrimSpace(amountWei), 10)
-	if !ok {
-		return false, fmt.Errorf("invalid amount_wei %q", amountWei)
-	}
-	if amount.Sign() < 0 {
-		return false, fmt.Errorf("amount_wei must be non-negative")
+func parseNonNegativeWei(value string) (*big.Int, error) {
+	amount, err := parseWei(value)
+	if err != nil {
+		return nil, err
 	}
 
-	minAmount, ok := new(big.Int).SetString(strings.TrimSpace(minWei), 10)
-	if !ok {
-		return false, fmt.Errorf("invalid min_wei %q", minWei)
+	if amount.Sign() < 0 {
+		return nil, fmt.Errorf("value must be non-negative")
 	}
-	if minAmount.Sign() <= 0 {
-		return false, fmt.Errorf("min_wei must be positive")
-	}
-	return amount.Cmp(minAmount) >= 0, nil
+
+	return amount, nil
 }
