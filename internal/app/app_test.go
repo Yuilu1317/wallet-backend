@@ -8,6 +8,16 @@ import (
 	"github.com/Yuilu1317/wallet-backend/internal/config"
 )
 
+type fakeDepositScanner struct {
+	calls int
+	err   error
+}
+
+func (f *fakeDepositScanner) ScanOnce(ctx context.Context) error {
+	f.calls++
+	return f.err
+}
+
 func validConfig() *config.Config {
 	return &config.Config{
 		App: config.AppConfig{
@@ -55,7 +65,8 @@ func TestRun_WithCanceledContext_ReturnsNil(t *testing.T) {
 	t.Parallel()
 
 	application := &App{
-		cfg: validConfig(),
+		cfg:                     validConfig(),
+		nativeETHDepositScanner: &fakeDepositScanner{},
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -72,8 +83,8 @@ func TestClose_WithNilWalletDB_ReturnsNil(t *testing.T) {
 	t.Parallel()
 
 	application := &App{
-		cfg:      validConfig(),
-		walletDB: nil,
+		cfg:                     validConfig(),
+		nativeETHDepositScanner: &fakeDepositScanner{},
 	}
 
 	err := application.Close()
