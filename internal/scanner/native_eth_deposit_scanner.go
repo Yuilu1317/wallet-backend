@@ -185,7 +185,29 @@ func (s *NativeETHDepositScanner) ScanOnce(ctx context.Context) error {
 		return fmt.Errorf("unexpected response chain_id: got=%d expected=%d", resp.ChainID, s.cfg.ChainID)
 	}
 
-	return s.processBlocks(ctx, fromBlock, previousHash, resp.Blocks)
+	if err := s.processBlocks(ctx, fromBlock, previousHash, resp.Blocks); err != nil {
+		return err
+	}
+
+	firstBlock := resp.Blocks[0].Number
+	lastBlock := resp.Blocks[len(resp.Blocks)-1].Number
+
+	txCount := 0
+	for _, block := range resp.Blocks {
+		txCount += len(block.Transactions)
+	}
+
+	log.Printf(
+		"native eth scanner scan completed: chain_id=%d from_block=%d first_block=%d last_block=%d block_count=%d tx_count=%d",
+		s.cfg.ChainID,
+		fromBlock,
+		firstBlock,
+		lastBlock,
+		len(resp.Blocks),
+		txCount,
+	)
+
+	return nil
 }
 
 func (s *NativeETHDepositScanner) processBlocks(
