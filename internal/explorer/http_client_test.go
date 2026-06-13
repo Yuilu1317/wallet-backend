@@ -369,3 +369,306 @@ func TestHTTPClient_ListCompletedBlocks_UnexpectedChainIDReturnsError(t *testing
 		t.Fatalf("expected unexpected chain_id error, got %q", err.Error())
 	}
 }
+
+func TestHTTPClient_GetSyncStatus_ValidatesChainID(t *testing.T) {
+	client, err := NewHTTPClient("http://localhost:8080", time.Second)
+	if err != nil {
+		t.Fatalf("new http client: %v", err)
+	}
+
+	tests := []struct {
+		name    string
+		chainID int64
+		wantErr string
+	}{
+		{
+			name:    "zero chain id",
+			chainID: 0,
+			wantErr: "chain_id must be positive",
+		},
+		{
+			name:    "negative chain id",
+			chainID: -1,
+			wantErr: "chain_id must be positive",
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+
+		t.Run(tt.name, func(t *testing.T) {
+			resp, err := client.GetSyncStatus(context.Background(), tt.chainID)
+			if err == nil {
+				t.Fatal("expected error, got nil")
+			}
+
+			if resp != nil {
+				t.Fatalf("expected nil response, got %+v", resp)
+			}
+
+			if !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("expected error to contain %q, got %q", tt.wantErr, err.Error())
+			}
+		})
+	}
+}
+
+func TestHTTPClient_GetSyncStatus_Success(t *testing.T) {
+	var called bool
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+
+		if r.Method != http.MethodGet {
+			t.Errorf("expected method GET, got %s", r.Method)
+		}
+
+		if r.URL.Path != SyncStatusPath {
+			t.Errorf("expected path %s, got %s", SyncStatusPath, r.URL.Path)
+		}
+
+		query := r.URL.Query()
+		if got := query.Get("chain_id"); got != "11155111" {
+			t.Errorf("expected chain_id=11155111, got %q", got)
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{
+			"chain_id": 11155111,
+			"sync_target": "safe",
+			"latest_completed_block": {
+				"number": 11008017,
+				"hash": "0xblock"
+			}
+		}`))
+	}))
+	defer server.Close()
+
+	client, err := NewHTTPClient(server.URL, time.Second)
+	if err != nil {
+		t.Fatalf("new http client: %v", err)
+	}
+
+	resp, err := client.GetSyncStatus(context.Background(), 11155111)
+	if err != nil {
+		t.Fatalf("get sync status: %v", err)
+	}
+
+	if !called {
+		t.Fatal("expected server to be called")
+	}
+
+	if resp == nil {
+		t.Fatal("expected response, got nil")
+	}
+
+	if resp.ChainID != 11155111 {
+		t.Fatalf("expected chain id 11155111, got %d", resp.ChainID)
+	}
+
+	if resp.SyncTarget != "safe" {
+		t.Fatalf("expected sync target safe, got %q", resp.SyncTarget)
+	}
+
+	if resp.LatestCompletedBlock == nil {
+		t.Fatal("expected latest completed block, got nil")
+	}
+
+	if resp.LatestCompletedBlock.Number != 11008017 {
+		t.Fatalf("expected latest completed block number 11008017, got %d", resp.LatestCompletedBlock.Number)
+	}
+
+	if resp.LatestCompletedBlock.Hash != "0xblock" {
+		t.Fatalf("expected latest completed block hash 0xblock, got %q", resp.LatestCompletedBlock.Hash)
+	}
+}
+
+func TestHTTPClient_GetSyncStatus_Non2xxReturnsError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = w.Write([]byte(`{"error":"explorer unavailable"}`))
+	}))
+	defer server.Close()
+
+	client, err := NewHTTPClient(server.URL, time.Second)
+	if err != nil {
+		t.Fatalf("new http client: %v", err)
+	}
+
+	resp, err := client.GetSyncStatus(context.Background(), 11155111)
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+
+	if resp != nil {
+		t.Fatalf("expected nil response, got %+v", resp)
+	}
+
+	if !strings.Contains(err.Error(), "status_code=503") {
+		t.Fatalf("expected status code error, got %q", err.Error())
+	}
+
+	if !strings.Contains(err.Error(), "explorer unavailable") {
+		t.Fatalf("expected response body in error, got %q", err.Error())
+	}
+}
+
+func TestHTTPClient_GetSyncStatus_InvalidJSONReturnsError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`not-json`))
+	}))
+	defer server.Close()
+
+	client, err := NewHTTPClient(server.URL, time.Second)
+	if err != nil {
+		t.Fatalf("new http client: %v", err)
+	}
+
+	resp, err := client.GetSyncStatus(context.Background(), 11155111)
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+
+	if resp != nil {
+		t.Fatalf("expected nil response, got %+v", resp)
+	}
+
+	if !strings.Contains(err.Error(), "decode sync status") {
+		t.Fatalf("expected decode error, got %q", err.Error())
+	}
+}
+
+func TestHTTPClient_GetSyncStatus_UnexpectedChainIDReturnsError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{
+			"chain_id": 1,
+			"sync_target": "safe",
+			"latest_completed_block": {
+				"number": 11008017,
+				"hash": "0xblock"
+			}
+		}`))
+	}))
+	defer server.Close()
+
+	client, err := NewHTTPClient(server.URL, time.Second)
+	if err != nil {
+		t.Fatalf("new http client: %v", err)
+	}
+
+	resp, err := client.GetSyncStatus(context.Background(), 11155111)
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+
+	if resp != nil {
+		t.Fatalf("expected nil response, got %+v", resp)
+	}
+
+	if !strings.Contains(err.Error(), "unexpected response chain_id") {
+		t.Fatalf("expected unexpected chain_id error, got %q", err.Error())
+	}
+}
+
+func TestHTTPClient_GetSyncStatus_NilLatestCompletedBlockReturnsError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{
+			"chain_id": 11155111,
+			"sync_target": "safe",
+			"latest_completed_block": null
+		}`))
+	}))
+	defer server.Close()
+
+	client, err := NewHTTPClient(server.URL, time.Second)
+	if err != nil {
+		t.Fatalf("new http client: %v", err)
+	}
+
+	resp, err := client.GetSyncStatus(context.Background(), 11155111)
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+
+	if resp != nil {
+		t.Fatalf("expected nil response, got %+v", resp)
+	}
+
+	if !strings.Contains(err.Error(), "latest_completed_block is nil") {
+		t.Fatalf("expected nil latest_completed_block error, got %q", err.Error())
+	}
+}
+
+func TestHTTPClient_GetSyncStatus_NegativeLatestCompletedBlockNumberReturnsError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{
+			"chain_id": 11155111,
+			"sync_target": "safe",
+			"latest_completed_block": {
+				"number": -1,
+				"hash": "0xblock"
+			}
+		}`))
+	}))
+	defer server.Close()
+
+	client, err := NewHTTPClient(server.URL, time.Second)
+	if err != nil {
+		t.Fatalf("new http client: %v", err)
+	}
+
+	resp, err := client.GetSyncStatus(context.Background(), 11155111)
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+
+	if resp != nil {
+		t.Fatalf("expected nil response, got %+v", resp)
+	}
+
+	if !strings.Contains(err.Error(), "latest_completed_block.number must be non-negative") {
+		t.Fatalf("expected negative block number error, got %q", err.Error())
+	}
+}
+
+func TestHTTPClient_GetSyncStatus_EmptyLatestCompletedBlockHashReturnsError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{
+			"chain_id": 11155111,
+			"sync_target": "safe",
+			"latest_completed_block": {
+				"number": 11008017,
+				"hash": "   "
+			}
+		}`))
+	}))
+	defer server.Close()
+
+	client, err := NewHTTPClient(server.URL, time.Second)
+	if err != nil {
+		t.Fatalf("new http client: %v", err)
+	}
+
+	resp, err := client.GetSyncStatus(context.Background(), 11155111)
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+
+	if resp != nil {
+		t.Fatalf("expected nil response, got %+v", resp)
+	}
+
+	if !strings.Contains(err.Error(), "latest_completed_block.hash is required") {
+		t.Fatalf("expected empty hash error, got %q", err.Error())
+	}
+}

@@ -82,7 +82,7 @@ func (c *Config) Validate() error {
 		return err
 	}
 
-	if err := validatePositiveInt64("ethereum.confirmation_depth", c.Ethereum.ConfirmationDepth); err != nil {
+	if err := validateNonNegativeInt64("ethereum.confirmation_depth", c.Ethereum.ConfirmationDepth); err != nil {
 		return err
 	}
 

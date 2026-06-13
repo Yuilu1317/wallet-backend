@@ -96,9 +96,9 @@ func TestConfigValidate_WithInvalidConfig_ReturnsError(t *testing.T) {
 		{
 			name: "non-positive confirmation depth",
 			mutate: func(cfg *Config) {
-				cfg.Ethereum.ConfirmationDepth = 0
+				cfg.Ethereum.ConfirmationDepth = -1
 			},
-			wantErr: "ethereum.confirmation_depth must be positive",
+			wantErr: "ethereum.confirmation_depth must be non-negative",
 		},
 		{
 			name: "missing min deposit wei",

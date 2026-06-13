@@ -12,6 +12,17 @@ import (
 	"github.com/Yuilu1317/wallet-backend/internal/model"
 )
 
+// ExplorerClient defines the wallet-facing contract for reading completed chain data
+// from the block explorer service.
+type ExplorerClient interface {
+	GetSyncStatus(ctx context.Context, chainID int64) (*explorer.SyncStatusResponse, error)
+
+	ListCompletedBlocks(
+		ctx context.Context,
+		req explorer.ListCompletedBlocksRequest,
+	) (*explorer.ListCompletedBlocksResponse, error)
+}
+
 type DepositAddressRepository interface {
 	FindActiveByChainIDAndAddressLower(
 		ctx context.Context,
@@ -41,11 +52,12 @@ type CursorRepository interface {
 }
 
 type Config struct {
-	ChainID       int64
-	ScannerName   string
-	StartBlock    int64
-	BatchSize     int
-	MinDepositWei string
+	ChainID           int64
+	ScannerName       string
+	StartBlock        int64
+	BatchSize         int
+	MinDepositWei     string
+	ConfirmationDepth int64
 }
 
 type Repositories struct {
@@ -65,14 +77,14 @@ type NativeETHDepositScanner struct {
 	cfg           Config
 	minDepositWei *big.Int
 
-	explorerClient explorer.Client
+	explorerClient ExplorerClient
 	cursorRepo     CursorRepository
 	txRunner       TransactionRunner
 }
 
 func NewNativeETHDepositScanner(
 	cfg Config,
-	explorerClient explorer.Client,
+	explorerClient ExplorerClient,
 	cursorRepo CursorRepository,
 	txRunner TransactionRunner,
 ) (*NativeETHDepositScanner, error) {
@@ -154,39 +166,82 @@ func validateConfig(cfg Config) error {
 		return fmt.Errorf("scanner.min_deposit_wei is required")
 	}
 
+	if cfg.ConfirmationDepth < 0 {
+		return fmt.Errorf("scanner.confirmation_depth must be non-negative")
+	}
+
 	return nil
 }
 
 func (s *NativeETHDepositScanner) ScanOnce(ctx context.Context) error {
+	syncStatus, err := s.explorerClient.GetSyncStatus(ctx, s.cfg.ChainID)
+	if err != nil {
+		return fmt.Errorf("get explorer sync status: %w", err)
+	}
+
+	if err := s.validateSyncStatusResponse(syncStatus); err != nil {
+		return fmt.Errorf("validate sync status response: %w", err)
+	}
+
 	cursor, found, err := s.cursorRepo.GetByChainIDAndScannerName(ctx, s.cfg.ChainID, s.cfg.ScannerName)
 	if err != nil {
 		return fmt.Errorf("get scanner cursor: %w", err)
 	}
-	fromBlock := s.cfg.StartBlock
+
+	lastScannedBlock := s.cfg.StartBlock - 1
 	previousHash := ""
 	if found {
-		fromBlock = cursor.LastScannedBlockNumber + 1
+		lastScannedBlock = cursor.LastScannedBlockNumber
 		previousHash = cursor.LastScannedBlockHash
+	}
+
+	scanRange, shouldScan, err := PlanScanRange(
+		syncStatus.LatestCompletedBlock.Number,
+		s.cfg.ConfirmationDepth,
+		lastScannedBlock,
+		s.cfg.BatchSize,
+	)
+	if err != nil {
+		return fmt.Errorf("plan scan range: %w", err)
+	}
+
+	if !shouldScan {
+		log.Printf(
+			"native eth scanner no blocks to scan: chain_id=%d latest_completed_block=%d confirmation_depth=%d last_scanned_block=%d",
+			s.cfg.ChainID,
+			syncStatus.LatestCompletedBlock.Number,
+			s.cfg.ConfirmationDepth,
+			lastScannedBlock,
+		)
+		return nil
 	}
 
 	resp, err := s.explorerClient.ListCompletedBlocks(ctx, explorer.ListCompletedBlocksRequest{
 		ChainID:   s.cfg.ChainID,
-		FromBlock: fromBlock,
-		Limit:     s.cfg.BatchSize,
+		FromBlock: scanRange.FromBlock,
+		Limit:     scanRange.Limit,
 	})
 	if err != nil {
 		return fmt.Errorf("list completed blocks: %w", err)
 	}
 
-	if resp == nil {
-		return fmt.Errorf("list completed blocks returned nil response")
-	}
-	if resp.ChainID != s.cfg.ChainID {
-		return fmt.Errorf("unexpected response chain_id: got=%d expected=%d", resp.ChainID, s.cfg.ChainID)
+	if err := s.validateCompletedBlocksResponse(resp, scanRange); err != nil {
+		return fmt.Errorf("validate completed blocks response: %w", err)
 	}
 
-	if err := s.processBlocks(ctx, fromBlock, previousHash, resp.Blocks); err != nil {
-		return err
+	if len(resp.Blocks) == 0 {
+		log.Printf(
+			"native eth scanner completed blocks response is empty: chain_id=%d from_block=%d limit=%d confirmed_target_block=%d",
+			s.cfg.ChainID,
+			scanRange.FromBlock,
+			scanRange.Limit,
+			scanRange.ConfirmedTargetBlockNumber,
+		)
+		return nil
+	}
+
+	if err := s.processBlocks(ctx, scanRange.FromBlock, previousHash, resp.Blocks); err != nil {
+		return fmt.Errorf("process blocks: %w", err)
 	}
 
 	firstBlock := resp.Blocks[0].Number
@@ -198,14 +253,70 @@ func (s *NativeETHDepositScanner) ScanOnce(ctx context.Context) error {
 	}
 
 	log.Printf(
-		"native eth scanner scan completed: chain_id=%d from_block=%d first_block=%d last_block=%d block_count=%d tx_count=%d",
+		"native eth scanner scan completed: chain_id=%d from_block=%d first_block=%d last_block=%d block_count=%d tx_count=%d confirmed_target_block=%d latest_completed_block=%d confirmation_depth=%d",
 		s.cfg.ChainID,
-		fromBlock,
+		scanRange.FromBlock,
 		firstBlock,
 		lastBlock,
 		len(resp.Blocks),
 		txCount,
+		scanRange.ConfirmedTargetBlockNumber,
+		syncStatus.LatestCompletedBlock.Number,
+		s.cfg.ConfirmationDepth,
 	)
+
+	return nil
+}
+
+func (s *NativeETHDepositScanner) validateSyncStatusResponse(resp *explorer.SyncStatusResponse) error {
+	if resp == nil {
+		return fmt.Errorf("get explorer sync status returned nil response")
+	}
+
+	if resp.ChainID != s.cfg.ChainID {
+		return fmt.Errorf("unexpected sync status chain_id: got=%d expected=%d", resp.ChainID, s.cfg.ChainID)
+	}
+
+	if resp.LatestCompletedBlock == nil {
+		return fmt.Errorf("sync status latest_completed_block is nil")
+	}
+
+	return nil
+}
+
+func (s *NativeETHDepositScanner) validateCompletedBlocksResponse(
+	resp *explorer.ListCompletedBlocksResponse,
+	scanRange *ScanRange,
+) error {
+	if resp == nil {
+		return fmt.Errorf("list completed blocks returned nil response")
+	}
+
+	if scanRange == nil {
+		return fmt.Errorf("scan range is nil")
+	}
+
+	if resp.ChainID != s.cfg.ChainID {
+		return fmt.Errorf("unexpected response chain_id: got=%d expected=%d", resp.ChainID, s.cfg.ChainID)
+	}
+
+	if len(resp.Blocks) > scanRange.Limit {
+		return fmt.Errorf(
+			"completed blocks response exceeds requested limit: got=%d limit=%d",
+			len(resp.Blocks),
+			scanRange.Limit,
+		)
+	}
+
+	for _, block := range resp.Blocks {
+		if block.Number > scanRange.ConfirmedTargetBlockNumber {
+			return fmt.Errorf(
+				"completed block exceeds confirmed target: block=%d confirmed_target_block=%d",
+				block.Number,
+				scanRange.ConfirmedTargetBlockNumber,
+			)
+		}
+	}
 
 	return nil
 }

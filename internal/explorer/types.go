@@ -1,5 +1,20 @@
 package explorer
 
+type SyncStatusRequest struct {
+	ChainID int64
+}
+
+type SyncStatusResponse struct {
+	ChainID              int64                  `json:"chain_id"`
+	SyncTarget           string                 `json:"sync_target"`
+	LatestCompletedBlock *CompletedBlockSummary `json:"latest_completed_block"`
+}
+
+type CompletedBlockSummary struct {
+	Number int64  `json:"number"`
+	Hash   string `json:"hash"`
+}
+
 type ListCompletedBlocksRequest struct {
 	ChainID   int64
 	FromBlock int64

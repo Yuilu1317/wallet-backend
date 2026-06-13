@@ -2,6 +2,7 @@ package scanner
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -12,7 +13,7 @@ import (
 func newScannerForTest(
 	t *testing.T,
 	cfg Config,
-	explorerClient explorer.Client,
+	explorerClient ExplorerClient,
 	cursorRepo CursorRepository,
 	txRunner TransactionRunner,
 ) *NativeETHDepositScanner {
@@ -33,18 +34,47 @@ func newScannerForTest(
 
 func validScannerConfig() Config {
 	return Config{
-		ChainID:       11155111,
-		ScannerName:   "native_eth_deposit_scanner",
-		StartBlock:    100,
-		BatchSize:     10,
-		MinDepositWei: "10",
+		ChainID:           11155111,
+		ScannerName:       "native_eth_deposit_scanner",
+		StartBlock:        100,
+		BatchSize:         10,
+		ConfirmationDepth: 12,
+		MinDepositWei:     "10",
+	}
+}
+
+func validSyncStatus(chainID int64, latestCompletedBlock int64) *explorer.SyncStatusResponse {
+	return &explorer.SyncStatusResponse{
+		ChainID:    chainID,
+		SyncTarget: "safe",
+		LatestCompletedBlock: &explorer.CompletedBlockSummary{
+			Number: latestCompletedBlock,
+			Hash:   "0xlatest",
+		},
 	}
 }
 
 type fakeExplorerClient struct {
+	syncStatusResp     *explorer.SyncStatusResponse
+	syncStatusErr      error
+	syncStatusChainIDs []int64
+
 	resp     *explorer.ListCompletedBlocksResponse
 	err      error
 	requests []explorer.ListCompletedBlocksRequest
+}
+
+func (f *fakeExplorerClient) GetSyncStatus(
+	ctx context.Context,
+	chainID int64,
+) (*explorer.SyncStatusResponse, error) {
+	f.syncStatusChainIDs = append(f.syncStatusChainIDs, chainID)
+
+	if f.syncStatusErr != nil {
+		return nil, f.syncStatusErr
+	}
+
+	return f.syncStatusResp, nil
 }
 
 func (f *fakeExplorerClient) ListCompletedBlocks(
@@ -114,6 +144,9 @@ type fakeCursorRepo struct {
 	found  bool
 	err    error
 
+	getChainIDs     []int64
+	getScannerNames []string
+
 	upserts   []*model.WalletScannerCursor
 	upsertErr error
 }
@@ -123,6 +156,9 @@ func (f *fakeCursorRepo) GetByChainIDAndScannerName(
 	chainID int64,
 	scannerName string,
 ) (*model.WalletScannerCursor, bool, error) {
+	f.getChainIDs = append(f.getChainIDs, chainID)
+	f.getScannerNames = append(f.getScannerNames, scannerName)
+
 	if f.err != nil {
 		return nil, false, f.err
 	}
@@ -177,10 +213,203 @@ func (f *fakeTransactionRunner) WithinTransaction(
 	return fn(f.repos)
 }
 
+func completedBlock(number int64) explorer.CompletedBlock {
+	return explorer.CompletedBlock{
+		Number:     number,
+		Hash:       fmt.Sprintf("0xblock%d", number),
+		ParentHash: fmt.Sprintf("0xblock%d", number-1),
+	}
+}
+
+func validScanRange() *ScanRange {
+	return &ScanRange{
+		FromBlock:                  100,
+		Limit:                      3,
+		ConfirmedTargetBlockNumber: 102,
+	}
+}
+
+func assertErrorContains(t *testing.T, err error, want string) {
+	t.Helper()
+
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+
+	if !strings.Contains(err.Error(), want) {
+		t.Fatalf("expected error to contain %q, got %q", want, err.Error())
+	}
+}
+
+func assertNoProcessing(t *testing.T, txRunner *fakeTransactionRunner, cursorRepo *fakeCursorRepo) {
+	t.Helper()
+
+	if txRunner.calls != 0 {
+		t.Fatalf("expected no transaction call, got %d", txRunner.calls)
+	}
+
+	if len(cursorRepo.upserts) != 0 {
+		t.Fatalf("expected no cursor upsert, got %d", len(cursorRepo.upserts))
+	}
+}
+
+func assertCompletedBlocksRequest(
+	t *testing.T,
+	explorerClient *fakeExplorerClient,
+	wantChainID int64,
+	wantFromBlock int64,
+	wantLimit int,
+) {
+	t.Helper()
+
+	if len(explorerClient.requests) != 1 {
+		t.Fatalf("expected 1 completed-blocks request, got %d", len(explorerClient.requests))
+	}
+
+	req := explorerClient.requests[0]
+	if req.ChainID != wantChainID {
+		t.Fatalf("expected request chain id %d, got %d", wantChainID, req.ChainID)
+	}
+
+	if req.FromBlock != wantFromBlock {
+		t.Fatalf("expected from block %d, got %d", wantFromBlock, req.FromBlock)
+	}
+
+	if req.Limit != wantLimit {
+		t.Fatalf("expected limit %d, got %d", wantLimit, req.Limit)
+	}
+}
+
+func assertCursorUpsert(
+	t *testing.T,
+	cursorRepo *fakeCursorRepo,
+	index int,
+	wantBlockNumber int64,
+	wantBlockHash string,
+) {
+	t.Helper()
+
+	if len(cursorRepo.upserts) <= index {
+		t.Fatalf("expected cursor upsert at index %d, got %d upserts", index, len(cursorRepo.upserts))
+	}
+
+	got := cursorRepo.upserts[index]
+	if got.LastScannedBlockNumber != wantBlockNumber {
+		t.Fatalf("expected cursor block %d, got %d", wantBlockNumber, got.LastScannedBlockNumber)
+	}
+
+	if got.LastScannedBlockHash != wantBlockHash {
+		t.Fatalf("expected cursor hash %q, got %q", wantBlockHash, got.LastScannedBlockHash)
+	}
+}
+
+func TestNativeETHDepositScanner_ValidateCompletedBlocksResponse(t *testing.T) {
+	cfg := validScannerConfig()
+
+	scanner := &NativeETHDepositScanner{
+		cfg: cfg,
+	}
+
+	tests := []struct {
+		name      string
+		resp      *explorer.ListCompletedBlocksResponse
+		scanRange *ScanRange
+		wantErr   string
+	}{
+		{
+			name:      "nil response",
+			resp:      nil,
+			scanRange: validScanRange(),
+			wantErr:   "list completed blocks returned nil response",
+		},
+		{
+			name: "nil scan range",
+			resp: &explorer.ListCompletedBlocksResponse{
+				ChainID: cfg.ChainID,
+				Blocks:  []explorer.CompletedBlock{},
+			},
+			scanRange: nil,
+			wantErr:   "scan range is nil",
+		},
+		{
+			name: "unexpected chain id",
+			resp: &explorer.ListCompletedBlocksResponse{
+				ChainID: 1,
+				Blocks:  []explorer.CompletedBlock{},
+			},
+			scanRange: validScanRange(),
+			wantErr:   "unexpected response chain_id",
+		},
+		{
+			name: "response exceeds requested limit",
+			resp: &explorer.ListCompletedBlocksResponse{
+				ChainID: cfg.ChainID,
+				Blocks: []explorer.CompletedBlock{
+					completedBlock(100),
+					completedBlock(101),
+					completedBlock(102),
+					completedBlock(103),
+				},
+			},
+			scanRange: validScanRange(),
+			wantErr:   "completed blocks response exceeds requested limit",
+		},
+		{
+			name: "block exceeds confirmed target",
+			resp: &explorer.ListCompletedBlocksResponse{
+				ChainID: cfg.ChainID,
+				Blocks: []explorer.CompletedBlock{
+					completedBlock(103),
+				},
+			},
+			scanRange: validScanRange(),
+			wantErr:   "completed block exceeds confirmed target",
+		},
+		{
+			name: "empty blocks is valid",
+			resp: &explorer.ListCompletedBlocksResponse{
+				ChainID: cfg.ChainID,
+				Blocks:  []explorer.CompletedBlock{},
+			},
+			scanRange: validScanRange(),
+		},
+		{
+			name: "valid response",
+			resp: &explorer.ListCompletedBlocksResponse{
+				ChainID: cfg.ChainID,
+				Blocks: []explorer.CompletedBlock{
+					completedBlock(100),
+					completedBlock(101),
+					completedBlock(102),
+				},
+			},
+			scanRange: validScanRange(),
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+
+		t.Run(tt.name, func(t *testing.T) {
+			err := scanner.validateCompletedBlocksResponse(tt.resp, tt.scanRange)
+
+			if tt.wantErr != "" {
+				assertErrorContains(t, err, tt.wantErr)
+				return
+			}
+
+			if err != nil {
+				t.Fatalf("expected nil error, got %v", err)
+			}
+		})
+	}
+}
+
 func TestNativeETHDepositScanner_ScanOnce_WithoutCursorRequestsStartBlockAndUpdatesCursor(t *testing.T) {
 	cfg := validScannerConfig()
 
 	explorerClient := &fakeExplorerClient{
+		syncStatusResp: validSyncStatus(cfg.ChainID, 200),
 		resp: &explorer.ListCompletedBlocksResponse{
 			ChainID: cfg.ChainID,
 			Blocks: []explorer.CompletedBlock{
@@ -210,11 +439,35 @@ func TestNativeETHDepositScanner_ScanOnce_WithoutCursorRequestsStartBlockAndUpda
 		t.Fatalf("expected nil error, got %v", err)
 	}
 
+	if len(explorerClient.syncStatusChainIDs) != 1 {
+		t.Fatalf("expected 1 sync status request, got %d", len(explorerClient.syncStatusChainIDs))
+	}
+
+	if explorerClient.syncStatusChainIDs[0] != cfg.ChainID {
+		t.Fatalf("expected sync status chain id %d, got %d", cfg.ChainID, explorerClient.syncStatusChainIDs[0])
+	}
+
+	if len(cursorRepo.getChainIDs) != 1 {
+		t.Fatalf("expected 1 cursor lookup, got %d", len(cursorRepo.getChainIDs))
+	}
+
+	if cursorRepo.getChainIDs[0] != cfg.ChainID {
+		t.Fatalf("expected cursor lookup chain id %d, got %d", cfg.ChainID, cursorRepo.getChainIDs[0])
+	}
+
+	if cursorRepo.getScannerNames[0] != cfg.ScannerName {
+		t.Fatalf("expected scanner name %q, got %q", cfg.ScannerName, cursorRepo.getScannerNames[0])
+	}
+
 	if len(explorerClient.requests) != 1 {
-		t.Fatalf("expected 1 explorer request, got %d", len(explorerClient.requests))
+		t.Fatalf("expected 1 explorer completed-blocks request, got %d", len(explorerClient.requests))
 	}
 
 	req := explorerClient.requests[0]
+	if req.ChainID != cfg.ChainID {
+		t.Fatalf("expected request chain id %d, got %d", cfg.ChainID, req.ChainID)
+	}
+
 	if req.FromBlock != cfg.StartBlock {
 		t.Fatalf("expected from block %d, got %d", cfg.StartBlock, req.FromBlock)
 	}
@@ -234,12 +487,17 @@ func TestNativeETHDepositScanner_ScanOnce_WithoutCursorRequestsStartBlockAndUpda
 	if cursorRepo.upserts[0].LastScannedBlockNumber != 100 {
 		t.Fatalf("expected cursor block 100, got %d", cursorRepo.upserts[0].LastScannedBlockNumber)
 	}
+
+	if cursorRepo.upserts[0].LastScannedBlockHash != "0xblock100" {
+		t.Fatalf("expected cursor hash 0xblock100, got %q", cursorRepo.upserts[0].LastScannedBlockHash)
+	}
 }
 
 func TestNativeETHDepositScanner_ScanOnce_WithCursorRequestsNextBlock(t *testing.T) {
 	cfg := validScannerConfig()
 
 	explorerClient := &fakeExplorerClient{
+		syncStatusResp: validSyncStatus(cfg.ChainID, 200),
 		resp: &explorer.ListCompletedBlocksResponse{
 			ChainID: cfg.ChainID,
 			Blocks: []explorer.CompletedBlock{
@@ -275,9 +533,17 @@ func TestNativeETHDepositScanner_ScanOnce_WithCursorRequestsNextBlock(t *testing
 		t.Fatalf("expected nil error, got %v", err)
 	}
 
+	if len(explorerClient.requests) != 1 {
+		t.Fatalf("expected 1 completed-blocks request, got %d", len(explorerClient.requests))
+	}
+
 	req := explorerClient.requests[0]
 	if req.FromBlock != 101 {
 		t.Fatalf("expected from block 101, got %d", req.FromBlock)
+	}
+
+	if req.Limit != cfg.BatchSize {
+		t.Fatalf("expected limit %d, got %d", cfg.BatchSize, req.Limit)
 	}
 
 	if txRunner.calls != 1 {
@@ -293,10 +559,289 @@ func TestNativeETHDepositScanner_ScanOnce_WithCursorRequestsNextBlock(t *testing
 	}
 }
 
+func TestNativeETHDepositScanner_ScanOnce_UsesConfirmedTargetToCapLimit(t *testing.T) {
+	cfg := validScannerConfig()
+	cfg.ConfirmationDepth = 3
+
+	explorerClient := &fakeExplorerClient{
+		syncStatusResp: validSyncStatus(cfg.ChainID, 105), // confirmed target = 102
+		resp: &explorer.ListCompletedBlocksResponse{
+			ChainID: cfg.ChainID,
+			Blocks: []explorer.CompletedBlock{
+				{
+					Number:     100,
+					Hash:       "0xblock100",
+					ParentHash: "0xblock99",
+				},
+				{
+					Number:     101,
+					Hash:       "0xblock101",
+					ParentHash: "0xblock100",
+				},
+				{
+					Number:     102,
+					Hash:       "0xblock102",
+					ParentHash: "0xblock101",
+				},
+			},
+		},
+	}
+
+	cursorRepo := &fakeCursorRepo{
+		found: false,
+	}
+
+	txRunner := newFakeTransactionRunner(
+		&fakeDepositAddressRepo{},
+		&fakeDepositRepo{},
+		cursorRepo,
+	)
+
+	scanner := newScannerForTest(t, cfg, explorerClient, cursorRepo, txRunner)
+
+	err := scanner.ScanOnce(context.Background())
+	if err != nil {
+		t.Fatalf("expected nil error, got %v", err)
+	}
+
+	if len(explorerClient.requests) != 1 {
+		t.Fatalf("expected 1 completed-blocks request, got %d", len(explorerClient.requests))
+	}
+
+	req := explorerClient.requests[0]
+	if req.FromBlock != 100 {
+		t.Fatalf("expected from block 100, got %d", req.FromBlock)
+	}
+
+	if req.Limit != 3 {
+		t.Fatalf("expected limit 3, got %d", req.Limit)
+	}
+
+	if txRunner.calls != 3 {
+		t.Fatalf("expected 3 transaction calls, got %d", txRunner.calls)
+	}
+
+	if len(cursorRepo.upserts) != 3 {
+		t.Fatalf("expected 3 cursor upserts, got %d", len(cursorRepo.upserts))
+	}
+
+	if cursorRepo.upserts[2].LastScannedBlockNumber != 102 {
+		t.Fatalf("expected final cursor block 102, got %d", cursorRepo.upserts[2].LastScannedBlockNumber)
+	}
+}
+
+func TestNativeETHDepositScanner_ScanOnce_NoConfirmedBlocksToScan(t *testing.T) {
+	cfg := validScannerConfig()
+
+	explorerClient := &fakeExplorerClient{
+		syncStatusResp: validSyncStatus(cfg.ChainID, 111), // confirmed target = 99
+		resp:           nil,
+	}
+
+	cursorRepo := &fakeCursorRepo{
+		found: false,
+	}
+
+	txRunner := newFakeTransactionRunner(
+		&fakeDepositAddressRepo{},
+		&fakeDepositRepo{},
+		cursorRepo,
+	)
+
+	scanner := newScannerForTest(t, cfg, explorerClient, cursorRepo, txRunner)
+
+	err := scanner.ScanOnce(context.Background())
+	if err != nil {
+		t.Fatalf("expected nil error, got %v", err)
+	}
+
+	if len(explorerClient.syncStatusChainIDs) != 1 {
+		t.Fatalf("expected 1 sync status request, got %d", len(explorerClient.syncStatusChainIDs))
+	}
+
+	if len(cursorRepo.getChainIDs) != 1 {
+		t.Fatalf("expected 1 cursor lookup, got %d", len(cursorRepo.getChainIDs))
+	}
+
+	if len(explorerClient.requests) != 0 {
+		t.Fatalf("expected no completed-blocks request, got %d", len(explorerClient.requests))
+	}
+
+	if txRunner.calls != 0 {
+		t.Fatalf("expected no transaction call, got %d", txRunner.calls)
+	}
+
+	if len(cursorRepo.upserts) != 0 {
+		t.Fatalf("expected no cursor upsert, got %d", len(cursorRepo.upserts))
+	}
+}
+
+func TestNativeETHDepositScanner_ScanOnce_GetSyncStatusErrorReturnsError(t *testing.T) {
+	cfg := validScannerConfig()
+
+	explorerClient := &fakeExplorerClient{
+		syncStatusErr: errTest("explorer unavailable"),
+	}
+
+	cursorRepo := &fakeCursorRepo{}
+	txRunner := newFakeTransactionRunner(
+		&fakeDepositAddressRepo{},
+		&fakeDepositRepo{},
+		cursorRepo,
+	)
+
+	scanner := newScannerForTest(t, cfg, explorerClient, cursorRepo, txRunner)
+
+	err := scanner.ScanOnce(context.Background())
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+
+	if !strings.Contains(err.Error(), "get explorer sync status") {
+		t.Fatalf("expected get sync status error, got %q", err.Error())
+	}
+
+	if len(cursorRepo.getChainIDs) != 0 {
+		t.Fatalf("expected no cursor lookup, got %d", len(cursorRepo.getChainIDs))
+	}
+
+	if len(explorerClient.requests) != 0 {
+		t.Fatalf("expected no completed-blocks request, got %d", len(explorerClient.requests))
+	}
+}
+
+func TestNativeETHDepositScanner_ScanOnce_NilSyncStatusReturnsError(t *testing.T) {
+	cfg := validScannerConfig()
+
+	explorerClient := &fakeExplorerClient{
+		syncStatusResp: nil,
+	}
+
+	cursorRepo := &fakeCursorRepo{}
+	txRunner := newFakeTransactionRunner(
+		&fakeDepositAddressRepo{},
+		&fakeDepositRepo{},
+		cursorRepo,
+	)
+
+	scanner := newScannerForTest(t, cfg, explorerClient, cursorRepo, txRunner)
+
+	err := scanner.ScanOnce(context.Background())
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+
+	if !strings.Contains(err.Error(), "get explorer sync status returned nil response") {
+		t.Fatalf("expected nil sync status error, got %q", err.Error())
+	}
+
+	if len(cursorRepo.getChainIDs) != 0 {
+		t.Fatalf("expected no cursor lookup, got %d", len(cursorRepo.getChainIDs))
+	}
+}
+
+func TestNativeETHDepositScanner_ScanOnce_UnexpectedSyncStatusChainIDReturnsError(t *testing.T) {
+	cfg := validScannerConfig()
+
+	explorerClient := &fakeExplorerClient{
+		syncStatusResp: validSyncStatus(1, 200),
+	}
+
+	cursorRepo := &fakeCursorRepo{}
+	txRunner := newFakeTransactionRunner(
+		&fakeDepositAddressRepo{},
+		&fakeDepositRepo{},
+		cursorRepo,
+	)
+
+	scanner := newScannerForTest(t, cfg, explorerClient, cursorRepo, txRunner)
+
+	err := scanner.ScanOnce(context.Background())
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+
+	if !strings.Contains(err.Error(), "unexpected sync status chain_id") {
+		t.Fatalf("expected unexpected sync status chain id error, got %q", err.Error())
+	}
+
+	if len(cursorRepo.getChainIDs) != 0 {
+		t.Fatalf("expected no cursor lookup, got %d", len(cursorRepo.getChainIDs))
+	}
+}
+
+func TestNativeETHDepositScanner_ScanOnce_NilLatestCompletedBlockReturnsError(t *testing.T) {
+	cfg := validScannerConfig()
+
+	explorerClient := &fakeExplorerClient{
+		syncStatusResp: &explorer.SyncStatusResponse{
+			ChainID:              cfg.ChainID,
+			SyncTarget:           "safe",
+			LatestCompletedBlock: nil,
+		},
+	}
+
+	cursorRepo := &fakeCursorRepo{}
+	txRunner := newFakeTransactionRunner(
+		&fakeDepositAddressRepo{},
+		&fakeDepositRepo{},
+		cursorRepo,
+	)
+
+	scanner := newScannerForTest(t, cfg, explorerClient, cursorRepo, txRunner)
+
+	err := scanner.ScanOnce(context.Background())
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+
+	if !strings.Contains(err.Error(), "sync status latest_completed_block is nil") {
+		t.Fatalf("expected nil latest completed block error, got %q", err.Error())
+	}
+
+	if len(cursorRepo.getChainIDs) != 0 {
+		t.Fatalf("expected no cursor lookup, got %d", len(cursorRepo.getChainIDs))
+	}
+}
+
+func TestNativeETHDepositScanner_ScanOnce_CursorErrorReturnsError(t *testing.T) {
+	cfg := validScannerConfig()
+
+	explorerClient := &fakeExplorerClient{
+		syncStatusResp: validSyncStatus(cfg.ChainID, 200),
+	}
+
+	cursorRepo := &fakeCursorRepo{
+		err: errTest("db error"),
+	}
+
+	txRunner := newFakeTransactionRunner(
+		&fakeDepositAddressRepo{},
+		&fakeDepositRepo{},
+		cursorRepo,
+	)
+
+	scanner := newScannerForTest(t, cfg, explorerClient, cursorRepo, txRunner)
+
+	err := scanner.ScanOnce(context.Background())
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+
+	if !strings.Contains(err.Error(), "get scanner cursor") {
+		t.Fatalf("expected get scanner cursor error, got %q", err.Error())
+	}
+
+	if len(explorerClient.requests) != 0 {
+		t.Fatalf("expected no completed-blocks request, got %d", len(explorerClient.requests))
+	}
+}
+
 func TestNativeETHDepositScanner_ScanOnce_SortsBlocksAndProcessesSequentially(t *testing.T) {
 	cfg := validScannerConfig()
 
 	explorerClient := &fakeExplorerClient{
+		syncStatusResp: validSyncStatus(cfg.ChainID, 200),
 		resp: &explorer.ListCompletedBlocksResponse{
 			ChainID: cfg.ChainID,
 			Blocks: []explorer.CompletedBlock{
@@ -349,6 +894,7 @@ func TestNativeETHDepositScanner_ScanOnce_MissingBlockReturnsError(t *testing.T)
 	cfg := validScannerConfig()
 
 	explorerClient := &fakeExplorerClient{
+		syncStatusResp: validSyncStatus(cfg.ChainID, 200),
 		resp: &explorer.ListCompletedBlocksResponse{
 			ChainID: cfg.ChainID,
 			Blocks: []explorer.CompletedBlock{
@@ -401,6 +947,7 @@ func TestNativeETHDepositScanner_ScanOnce_ParentHashMismatchReturnsError(t *test
 	cfg := validScannerConfig()
 
 	explorerClient := &fakeExplorerClient{
+		syncStatusResp: validSyncStatus(cfg.ChainID, 200),
 		resp: &explorer.ListCompletedBlocksResponse{
 			ChainID: cfg.ChainID,
 			Blocks: []explorer.CompletedBlock{
@@ -456,6 +1003,7 @@ func TestNativeETHDepositScanner_ScanOnce_CreatesDepositForMatchingTransaction(t
 	toAddressLower := strings.ToLower(toAddress)
 
 	explorerClient := &fakeExplorerClient{
+		syncStatusResp: validSyncStatus(cfg.ChainID, 200),
 		resp: &explorer.ListCompletedBlocksResponse{
 			ChainID: cfg.ChainID,
 			Blocks: []explorer.CompletedBlock{
@@ -546,6 +1094,14 @@ func TestNativeETHDepositScanner_ScanOnce_CreatesDepositForMatchingTransaction(t
 		t.Fatalf("expected normalized from address, got %q", got.FromAddress)
 	}
 
+	if got.BlockNumber != 100 {
+		t.Fatalf("expected block number 100, got %d", got.BlockNumber)
+	}
+
+	if got.BlockHash != "0xblock100" {
+		t.Fatalf("expected block hash 0xblock100, got %q", got.BlockHash)
+	}
+
 	if len(cursorRepo.upserts) != 1 {
 		t.Fatalf("expected 1 cursor upsert, got %d", len(cursorRepo.upserts))
 	}
@@ -562,6 +1118,7 @@ func TestNativeETHDepositScanner_ScanOnce_SkipsNonDepositTransactions(t *testing
 	toAddressLower := strings.ToLower(toAddress)
 
 	explorerClient := &fakeExplorerClient{
+		syncStatusResp: validSyncStatus(cfg.ChainID, 200),
 		resp: &explorer.ListCompletedBlocksResponse{
 			ChainID: cfg.ChainID,
 			Blocks: []explorer.CompletedBlock{
@@ -637,6 +1194,7 @@ func TestNativeETHDepositScanner_ScanOnce_InvalidAmountReturnsError(t *testing.T
 	cfg := validScannerConfig()
 
 	explorerClient := &fakeExplorerClient{
+		syncStatusResp: validSyncStatus(cfg.ChainID, 200),
 		resp: &explorer.ListCompletedBlocksResponse{
 			ChainID: cfg.ChainID,
 			Blocks: []explorer.CompletedBlock{
@@ -685,11 +1243,43 @@ func TestNativeETHDepositScanner_ScanOnce_InvalidAmountReturnsError(t *testing.T
 	}
 }
 
-func TestNativeETHDepositScanner_ScanOnce_NilResponseReturnsError(t *testing.T) {
+func TestNativeETHDepositScanner_ScanOnce_ListCompletedBlocksErrorReturnsError(t *testing.T) {
 	cfg := validScannerConfig()
 
 	explorerClient := &fakeExplorerClient{
-		resp: nil,
+		syncStatusResp: validSyncStatus(cfg.ChainID, 200),
+		err:            errTest("explorer list failed"),
+	}
+
+	cursorRepo := &fakeCursorRepo{}
+	txRunner := newFakeTransactionRunner(
+		&fakeDepositAddressRepo{},
+		&fakeDepositRepo{},
+		cursorRepo,
+	)
+
+	scanner := newScannerForTest(t, cfg, explorerClient, cursorRepo, txRunner)
+
+	err := scanner.ScanOnce(context.Background())
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+
+	if !strings.Contains(err.Error(), "list completed blocks") {
+		t.Fatalf("expected list completed blocks error, got %q", err.Error())
+	}
+
+	if txRunner.calls != 0 {
+		t.Fatalf("expected no transaction call, got %d", txRunner.calls)
+	}
+}
+
+func TestNativeETHDepositScanner_ScanOnce_NilListCompletedBlocksResponseReturnsError(t *testing.T) {
+	cfg := validScannerConfig()
+
+	explorerClient := &fakeExplorerClient{
+		syncStatusResp: validSyncStatus(cfg.ChainID, 200),
+		resp:           nil,
 	}
 
 	cursorRepo := &fakeCursorRepo{}
@@ -715,10 +1305,11 @@ func TestNativeETHDepositScanner_ScanOnce_NilResponseReturnsError(t *testing.T) 
 	}
 }
 
-func TestNativeETHDepositScanner_ScanOnce_UnexpectedChainIDReturnsError(t *testing.T) {
+func TestNativeETHDepositScanner_ScanOnce_UnexpectedCompletedBlocksChainIDReturnsError(t *testing.T) {
 	cfg := validScannerConfig()
 
 	explorerClient := &fakeExplorerClient{
+		syncStatusResp: validSyncStatus(cfg.ChainID, 200),
 		resp: &explorer.ListCompletedBlocksResponse{
 			ChainID: 1,
 			Blocks:  nil,
@@ -748,38 +1339,182 @@ func TestNativeETHDepositScanner_ScanOnce_UnexpectedChainIDReturnsError(t *testi
 	}
 }
 
-func TestNewNativeETHDepositScanner_InvalidMinDepositWeiReturnsError(t *testing.T) {
+func TestNativeETHDepositScanner_ScanOnce_CompletedBlocksResponseExceedsRequestedLimitReturnsError(t *testing.T) {
+	cfg := validScannerConfig()
+	cfg.ConfirmationDepth = 3
+
+	explorerClient := &fakeExplorerClient{
+		syncStatusResp: validSyncStatus(cfg.ChainID, 105), // confirmed target = 102, from = 100, limit = 3
+		resp: &explorer.ListCompletedBlocksResponse{
+			ChainID: cfg.ChainID,
+			Blocks: []explorer.CompletedBlock{
+				completedBlock(100),
+				completedBlock(101),
+				completedBlock(102),
+				completedBlock(103),
+			},
+		},
+	}
+
+	cursorRepo := &fakeCursorRepo{}
+	txRunner := newFakeTransactionRunner(
+		&fakeDepositAddressRepo{},
+		&fakeDepositRepo{},
+		cursorRepo,
+	)
+
+	scanner := newScannerForTest(t, cfg, explorerClient, cursorRepo, txRunner)
+
+	err := scanner.ScanOnce(context.Background())
+	assertErrorContains(t, err, "completed blocks response exceeds requested limit")
+	assertCompletedBlocksRequest(t, explorerClient, cfg.ChainID, 100, 3)
+	assertNoProcessing(t, txRunner, cursorRepo)
+}
+
+func TestNativeETHDepositScanner_ScanOnce_CompletedBlockExceedsConfirmedTargetReturnsError(t *testing.T) {
+	cfg := validScannerConfig()
+	cfg.ConfirmationDepth = 3
+
+	explorerClient := &fakeExplorerClient{
+		syncStatusResp: validSyncStatus(cfg.ChainID, 105), // confirmed target = 102, from = 100, limit = 3
+		resp: &explorer.ListCompletedBlocksResponse{
+			ChainID: cfg.ChainID,
+			Blocks: []explorer.CompletedBlock{
+				completedBlock(103),
+			},
+		},
+	}
+
+	cursorRepo := &fakeCursorRepo{}
+	txRunner := newFakeTransactionRunner(
+		&fakeDepositAddressRepo{},
+		&fakeDepositRepo{},
+		cursorRepo,
+	)
+
+	scanner := newScannerForTest(t, cfg, explorerClient, cursorRepo, txRunner)
+
+	err := scanner.ScanOnce(context.Background())
+	assertErrorContains(t, err, "completed block exceeds confirmed target")
+	assertCompletedBlocksRequest(t, explorerClient, cfg.ChainID, 100, 3)
+	assertNoProcessing(t, txRunner, cursorRepo)
+}
+
+func TestNativeETHDepositScanner_ScanOnce_EmptyCompletedBlocksResponseReturnsNil(t *testing.T) {
+	cfg := validScannerConfig()
+
+	explorerClient := &fakeExplorerClient{
+		syncStatusResp: validSyncStatus(cfg.ChainID, 200),
+		resp: &explorer.ListCompletedBlocksResponse{
+			ChainID: cfg.ChainID,
+			Blocks:  []explorer.CompletedBlock{},
+		},
+	}
+
+	cursorRepo := &fakeCursorRepo{}
+	txRunner := newFakeTransactionRunner(
+		&fakeDepositAddressRepo{},
+		&fakeDepositRepo{},
+		cursorRepo,
+	)
+
+	scanner := newScannerForTest(t, cfg, explorerClient, cursorRepo, txRunner)
+
+	err := scanner.ScanOnce(context.Background())
+	if err != nil {
+		t.Fatalf("expected nil error, got %v", err)
+	}
+
+	if len(explorerClient.requests) != 1 {
+		t.Fatalf("expected 1 completed-blocks request, got %d", len(explorerClient.requests))
+	}
+
+	if txRunner.calls != 0 {
+		t.Fatalf("expected no transaction call, got %d", txRunner.calls)
+	}
+
+	if len(cursorRepo.upserts) != 0 {
+		t.Fatalf("expected no cursor upsert, got %d", len(cursorRepo.upserts))
+	}
+}
+
+func TestNewNativeETHDepositScanner_InvalidConfigReturnsError(t *testing.T) {
 	tests := []struct {
-		name          string
-		minDepositWei string
-		wantErr       string
+		name    string
+		mutate  func(cfg *Config)
+		wantErr string
 	}{
 		{
-			name:          "empty",
-			minDepositWei: "",
-			wantErr:       "scanner.min_deposit_wei is required",
+			name: "invalid chain id",
+			mutate: func(cfg *Config) {
+				cfg.ChainID = 0
+			},
+			wantErr: "scanner.chain_id must be positive",
 		},
 		{
-			name:          "invalid integer",
-			minDepositWei: "abc",
-			wantErr:       "parse scanner.min_deposit_wei",
+			name: "empty scanner name",
+			mutate: func(cfg *Config) {
+				cfg.ScannerName = " "
+			},
+			wantErr: "scanner.name is required",
 		},
 		{
-			name:          "zero",
-			minDepositWei: "0",
-			wantErr:       "value must be positive",
+			name: "negative start block",
+			mutate: func(cfg *Config) {
+				cfg.StartBlock = -1
+			},
+			wantErr: "scanner.start_block must be non-negative",
 		},
 		{
-			name:          "negative",
-			minDepositWei: "-1",
-			wantErr:       "value must be positive",
+			name: "invalid batch size",
+			mutate: func(cfg *Config) {
+				cfg.BatchSize = 0
+			},
+			wantErr: "scanner.batch_size must be positive",
+		},
+		{
+			name: "empty min deposit wei",
+			mutate: func(cfg *Config) {
+				cfg.MinDepositWei = ""
+			},
+			wantErr: "scanner.min_deposit_wei is required",
+		},
+		{
+			name: "negative confirmation depth",
+			mutate: func(cfg *Config) {
+				cfg.ConfirmationDepth = -1
+			},
+			wantErr: "scanner.confirmation_depth must be non-negative",
+		},
+		{
+			name: "invalid min deposit wei",
+			mutate: func(cfg *Config) {
+				cfg.MinDepositWei = "abc"
+			},
+			wantErr: "parse scanner.min_deposit_wei",
+		},
+		{
+			name: "zero min deposit wei",
+			mutate: func(cfg *Config) {
+				cfg.MinDepositWei = "0"
+			},
+			wantErr: "value must be positive",
+		},
+		{
+			name: "negative min deposit wei",
+			mutate: func(cfg *Config) {
+				cfg.MinDepositWei = "-1"
+			},
+			wantErr: "value must be positive",
 		},
 	}
 
 	for _, tt := range tests {
+		tt := tt
+
 		t.Run(tt.name, func(t *testing.T) {
 			cfg := validScannerConfig()
-			cfg.MinDepositWei = tt.minDepositWei
+			tt.mutate(&cfg)
 
 			cursorRepo := &fakeCursorRepo{}
 			txRunner := newFakeTransactionRunner(
@@ -845,6 +1580,8 @@ func TestParsePositiveWei(t *testing.T) {
 	}
 
 	for _, tt := range tests {
+		tt := tt
+
 		t.Run(tt.name, func(t *testing.T) {
 			got, err := parsePositiveWei(tt.value)
 
@@ -911,6 +1648,8 @@ func TestParseNonNegativeWei(t *testing.T) {
 	}
 
 	for _, tt := range tests {
+		tt := tt
+
 		t.Run(tt.name, func(t *testing.T) {
 			got, err := parseNonNegativeWei(tt.value)
 
@@ -935,4 +1674,10 @@ func TestParseNonNegativeWei(t *testing.T) {
 			}
 		})
 	}
+}
+
+type errTest string
+
+func (e errTest) Error() string {
+	return string(e)
 }
