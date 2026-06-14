@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
@@ -13,9 +14,22 @@ type fakeDepositScanner struct {
 	err   error
 }
 
+type fakeDepositCreditService struct {
+	calls      int
+	credited   bool
+	err        error
+	gotChainID int64
+}
+
 func (f *fakeDepositScanner) ScanOnce(ctx context.Context) error {
 	f.calls++
 	return f.err
+}
+
+func (f *fakeDepositCreditService) CreditNext(ctx context.Context, chainID int64) (bool, error) {
+	f.calls++
+	f.gotChainID = chainID
+	return f.credited, f.err
 }
 
 func validConfig() *config.Config {
@@ -47,6 +61,7 @@ func validConfig() *config.Config {
 
 func TestNew_WithInvalidConfigPath_ReturnsError(t *testing.T) {
 	t.Parallel()
+
 	application, err := New("not-exist.yaml")
 	if err == nil {
 		t.Fatal("expected error, got nil")
@@ -64,9 +79,15 @@ func TestNew_WithInvalidConfigPath_ReturnsError(t *testing.T) {
 func TestRun_WithCanceledContext_ReturnsNil(t *testing.T) {
 	t.Parallel()
 
+	scanner := &fakeDepositScanner{}
+	creditService := &fakeDepositCreditService{
+		credited: true,
+	}
+
 	application := &App{
 		cfg:                     validConfig(),
-		nativeETHDepositScanner: &fakeDepositScanner{},
+		nativeETHDepositScanner: scanner,
+		depositCreditService:    creditService,
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -77,6 +98,84 @@ func TestRun_WithCanceledContext_ReturnsNil(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected nil error, got %v", err)
 	}
+
+	if scanner.calls != 1 {
+		t.Fatalf("expected scanner calls=1, got %d", scanner.calls)
+	}
+
+	if creditService.calls != 1 {
+		t.Fatalf("expected credit service calls=1, got %d", creditService.calls)
+	}
+
+	if creditService.gotChainID != 11155111 {
+		t.Fatalf("expected chain_id=11155111, got %d", creditService.gotChainID)
+	}
+}
+
+func TestRun_WhenScannerFails_ReturnsErrorAndDoesNotCredit(t *testing.T) {
+	t.Parallel()
+
+	scanner := &fakeDepositScanner{
+		err: errors.New("scanner failed"),
+	}
+	creditService := &fakeDepositCreditService{}
+
+	application := &App{
+		cfg:                     validConfig(),
+		nativeETHDepositScanner: scanner,
+		depositCreditService:    creditService,
+	}
+
+	err := application.Run(context.Background())
+
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+
+	if !strings.Contains(err.Error(), "scan native eth deposits once") {
+		t.Fatalf("expected scan error, got %q", err.Error())
+	}
+
+	if scanner.calls != 1 {
+		t.Fatalf("expected scanner calls=1, got %d", scanner.calls)
+	}
+
+	if creditService.calls != 0 {
+		t.Fatalf("expected credit service calls=0, got %d", creditService.calls)
+	}
+}
+
+func TestRun_WhenCreditFails_ReturnsError(t *testing.T) {
+	t.Parallel()
+
+	scanner := &fakeDepositScanner{}
+	creditService := &fakeDepositCreditService{
+		err: errors.New("credit failed"),
+	}
+
+	application := &App{
+		cfg:                     validConfig(),
+		nativeETHDepositScanner: scanner,
+		depositCreditService:    creditService,
+	}
+
+	err := application.Run(context.Background())
+
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+
+	if !strings.Contains(err.Error(), "credit native eth deposit once") {
+		t.Fatalf("expected credit error, got %q", err.Error())
+	}
+
+	if scanner.calls != 1 {
+		t.Fatalf("expected scanner calls=1, got %d", scanner.calls)
+	}
+
+	if creditService.calls != 1 {
+		t.Fatalf("expected credit service calls=1, got %d", creditService.calls)
+	}
 }
 
 func TestClose_WithNilWalletDB_ReturnsNil(t *testing.T) {
@@ -85,6 +184,7 @@ func TestClose_WithNilWalletDB_ReturnsNil(t *testing.T) {
 	application := &App{
 		cfg:                     validConfig(),
 		nativeETHDepositScanner: &fakeDepositScanner{},
+		depositCreditService:    &fakeDepositCreditService{},
 	}
 
 	err := application.Close()

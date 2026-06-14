@@ -11,16 +11,22 @@ import (
 	"github.com/Yuilu1317/wallet-backend/internal/db/repo"
 	"github.com/Yuilu1317/wallet-backend/internal/explorer"
 	"github.com/Yuilu1317/wallet-backend/internal/scanner"
+	"github.com/Yuilu1317/wallet-backend/internal/service"
 	"gorm.io/gorm"
 )
 
 type DepositScanner interface {
 	ScanOnce(ctx context.Context) error
 }
+
+type DepositCreditService interface {
+	CreditNext(ctx context.Context, chainID int64) (bool, error)
+}
 type App struct {
 	cfg                     *config.Config
 	walletDB                *gorm.DB
 	nativeETHDepositScanner DepositScanner
+	depositCreditService    DepositCreditService
 }
 
 func New(configPath string) (*App, error) {
@@ -61,10 +67,16 @@ func New(configPath string) (*App, error) {
 		return nil, fmt.Errorf("create native eth deposit scanner: %w", err)
 
 	}
+
+	depositCreditTxRunner := repo.NewDepositCreditTransactionRunner(walletDB)
+	depositCreditService := service.NewDepositCreditService(
+		depositCreditTxRunner,
+	)
 	return &App{
 		cfg:                     cfg,
 		walletDB:                walletDB,
 		nativeETHDepositScanner: nativeETHDepositScanner,
+		depositCreditService:    depositCreditService,
 	}, nil
 }
 
@@ -83,6 +95,19 @@ func (a *App) Run(ctx context.Context) error {
 		return fmt.Errorf("scan native eth deposits once: %w", err)
 	}
 	log.Println("native eth deposit scan once completed")
+	if a.depositCreditService == nil {
+		return fmt.Errorf("deposit credit service is nil")
+	}
+	credited, err := a.depositCreditService.CreditNext(ctx, a.cfg.Ethereum.ChainID)
+	if err != nil {
+		return fmt.Errorf("credit native eth deposit once: %w", err)
+	}
+
+	if credited {
+		log.Println("native eth deposit credit once completed")
+	} else {
+		log.Println("no creditable native eth deposit found")
+	}
 	log.Println("app is running, press Ctrl+C to stop")
 
 	<-ctx.Done()
