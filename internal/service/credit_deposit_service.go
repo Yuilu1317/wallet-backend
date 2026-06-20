@@ -4,8 +4,10 @@ import (
 	"context"
 	"fmt"
 	"math/big"
+	"time"
 
 	"github.com/Yuilu1317/wallet-backend/internal/model"
+	"github.com/Yuilu1317/wallet-backend/internal/types"
 )
 
 // CreditDepositRepository from deposit_repository.go
@@ -44,26 +46,109 @@ type CreditTxRunner interface {
 
 type DepositCreditService struct {
 	transaction CreditTxRunner
+	dbTimeout   time.Duration
 }
 
-func NewDepositCreditService(transaction CreditTxRunner) *DepositCreditService {
+func NewDepositCreditService(transaction CreditTxRunner, dbTimeout time.Duration) (*DepositCreditService, error) {
+	if dbTimeout <= 0 {
+		return nil, fmt.Errorf("deposit credit db timeout must be positive")
+	}
+	if transaction == nil {
+		return nil, fmt.Errorf("transaction runner is nil")
+	}
 	return &DepositCreditService{
 		transaction: transaction,
+		dbTimeout:   dbTimeout,
+	}, nil
+}
+
+func (s *DepositCreditService) lockNextCreditableDeposit(
+	ctx context.Context,
+	repos DepositCreditRepositories,
+	chainID int64,
+) (*model.Deposit, bool, error) {
+	creditDepositRepositoryCtx, cancel := s.createRepoCtx(ctx)
+	defer cancel()
+	deposit, found, err := repos.CreditDepositRepository.LockNextCreditableDeposit(
+		creditDepositRepositoryCtx,
+		chainID,
+	)
+	if err != nil {
+		if mapped := types.MapDBContextError(ctx, creditDepositRepositoryCtx, err); mapped != nil {
+			return nil, false, fmt.Errorf("lock next creditable deposit: %w", mapped)
+		}
+		return nil, false, fmt.Errorf("lock next creditable deposit: %w", err)
 	}
+	return deposit, found, nil
+}
+
+func (s *DepositCreditService) createDepositCreditLedgerIdempotently(
+	ctx context.Context,
+	repos DepositCreditRepositories,
+	ledger *model.BalanceLedger,
+) (bool, error) {
+	creditBalanceLedgerRepositoryCtx, cancel := s.createRepoCtx(ctx)
+	defer cancel()
+	ledgerCreated, err := repos.CreditBalanceLedgerRepository.CreateDepositCreditLedgerIdempotently(
+		creditBalanceLedgerRepositoryCtx,
+		ledger,
+	)
+	if err != nil {
+		if mapped := types.MapDBContextError(ctx, creditBalanceLedgerRepositoryCtx, err); mapped != nil {
+			return false, fmt.Errorf("create deposit credit ledger: %w", mapped)
+		}
+		return false, fmt.Errorf("create deposit credit ledger: %w", err)
+	}
+	return ledgerCreated, nil
+}
+
+func (s *DepositCreditService) addAvailableBalance(
+	ctx context.Context,
+	repos DepositCreditRepositories,
+	account *model.BalanceAccount,
+) error {
+	creditBalanceAccountRepositoryCtx, cancel := s.createRepoCtx(ctx)
+	defer cancel()
+	if err := repos.CreditBalanceAccountRepository.AddAvailableBalance(
+		creditBalanceAccountRepositoryCtx,
+		account,
+	); err != nil {
+		if mapped := types.MapDBContextError(ctx, creditBalanceAccountRepositoryCtx, err); mapped != nil {
+			return fmt.Errorf("add available balance: %w", mapped)
+		}
+		return fmt.Errorf("add available balance: %w", err)
+	}
+	return nil
+}
+
+func (s *DepositCreditService) markDepositCredited(
+	ctx context.Context,
+	repos DepositCreditRepositories,
+	depositID int64,
+) error {
+	creditDepositRepositoryCtx, cancel := s.createRepoCtx(ctx)
+	defer cancel()
+	if err := repos.CreditDepositRepository.MarkDepositCredited(
+		creditDepositRepositoryCtx,
+		depositID,
+	); err != nil {
+		if mapped := types.MapDBContextError(ctx, creditDepositRepositoryCtx, err); mapped != nil {
+			return fmt.Errorf("mark deposit credited: %w", mapped)
+		}
+		return fmt.Errorf("mark deposit credited: %w", err)
+	}
+	return nil
 }
 
 func (s *DepositCreditService) CreditNext(ctx context.Context, chainID int64) (bool, error) {
 	if chainID <= 0 {
 		return false, fmt.Errorf("chain_id must be positive: %d", chainID)
 	}
-	if s.transaction == nil {
-		return false, fmt.Errorf("transaction runner is nil")
-	}
 	var credited bool
 	err := s.transaction.WithinTransaction(ctx, func(repos DepositCreditRepositories) error {
-		deposit, found, err := repos.CreditDepositRepository.LockNextCreditableDeposit(ctx, chainID)
+		deposit, found, err := s.lockNextCreditableDeposit(ctx, repos, chainID)
 		if err != nil {
-			return fmt.Errorf("lock next creditable deposit: %w", err)
+			return err
 		}
 
 		if !found {
@@ -84,9 +169,10 @@ func (s *DepositCreditService) CreditNext(ctx context.Context, chainID int64) (b
 			SourceType:  model.LedgerSourceTypeDeposit,
 			SourceID:    deposit.ID,
 		}
-		ledgerCreated, err := repos.CreditBalanceLedgerRepository.CreateDepositCreditLedgerIdempotently(ctx, ledger)
+
+		ledgerCreated, err := s.createDepositCreditLedgerIdempotently(ctx, repos, ledger)
 		if err != nil {
-			return fmt.Errorf("create deposit credit ledger: %w", err)
+			return err
 		}
 		if !ledgerCreated {
 			return fmt.Errorf("deposit credit ledger already exists: deposit_id=%d", deposit.ID)
@@ -99,13 +185,15 @@ func (s *DepositCreditService) CreditNext(ctx context.Context, chainID int64) (b
 			AvailableBalance: deposit.AmountWei,
 			FrozenBalance:    "0",
 		}
-		if err := repos.CreditBalanceAccountRepository.AddAvailableBalance(ctx, account); err != nil {
-			return fmt.Errorf("add available balance: %w", err)
+
+		if err := s.addAvailableBalance(ctx, repos, account); err != nil {
+			return err
 		}
 
-		if err := repos.CreditDepositRepository.MarkDepositCredited(ctx, deposit.ID); err != nil {
-			return fmt.Errorf("mark deposit credited: %w", err)
+		if err := s.markDepositCredited(ctx, repos, deposit.ID); err != nil {
+			return err
 		}
+
 		credited = true
 		return nil
 	})
@@ -148,4 +236,8 @@ func validateCreditableDeposit(chainID int64, deposit *model.Deposit) error {
 		return fmt.Errorf("deposit receipt_status must be 1: %d", deposit.ReceiptStatus)
 	}
 	return nil
+}
+
+func (s *DepositCreditService) createRepoCtx(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeoutCause(ctx, s.dbTimeout, types.ErrDBTimeout)
 }

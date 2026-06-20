@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Yuilu1317/wallet-backend/internal/explorer"
 	"github.com/Yuilu1317/wallet-backend/internal/model"
@@ -40,6 +41,7 @@ func validScannerConfig() Config {
 		BatchSize:         10,
 		ConfirmationDepth: 12,
 		MinDepositWei:     "10",
+		DBTimeout:         time.Second,
 	}
 }
 

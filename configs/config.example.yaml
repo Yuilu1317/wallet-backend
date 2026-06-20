@@ -4,6 +4,7 @@ app:
 
 database:
   dsn: "${DATABASE_DSN}"
+  db_timeout_seconds : 5
 
 ethereum:
   chain_id: 11155111
@@ -12,10 +13,14 @@ ethereum:
 
 scanner:
   name: native_eth_deposit_scanner
-  start_block: 0
+  start_block: 11008017
   batch_size: 10
   poll_interval_seconds: 5
 
 explorer:
   base_url: "http://localhost:8080"
   timeout_seconds: 5
+
+worker :
+  worker.scanner_run_once_timeout_seconds: 60
+  worker.credit_run_once_timeout_seconds: 60

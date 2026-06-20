@@ -22,7 +22,8 @@ type AppConfig struct {
 }
 
 type DatabaseConfig struct {
-	DSN string `yaml:"dsn"`
+	DSN              string `yaml:"dsn"`
+	DBTimeoutSeconds int    `yaml:"db_timeout_seconds"`
 }
 
 type EthereumConfig struct {
@@ -75,6 +76,9 @@ func (c *Config) Validate() error {
 	}
 
 	if err := validateRequiredString("database.dsn", c.Database.DSN); err != nil {
+		return err
+	}
+	if err := validatePositiveInt("database.db_timeout_seconds", c.Database.DBTimeoutSeconds); err != nil {
 		return err
 	}
 

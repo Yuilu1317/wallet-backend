@@ -11,7 +11,7 @@ import (
 )
 
 func TestDepositCreditService_CreditNext_WithInvalidChainID_ReturnsError(t *testing.T) {
-	svc := NewDepositCreditService(&fakeTransactionRunner{})
+	svc, err := NewDepositCreditService(&fakeTransactionRunner{}, time.Second)
 
 	credited, err := svc.CreditNext(context.Background(), 0)
 
@@ -28,21 +28,14 @@ func TestDepositCreditService_CreditNext_WithInvalidChainID_ReturnsError(t *test
 	}
 }
 
-func TestDepositCreditService_CreditNext_WithNilTransactionRunner_ReturnsError(t *testing.T) {
-	svc := NewDepositCreditService(nil)
-
-	credited, err := svc.CreditNext(context.Background(), 11155111)
+func TestNewDepositCreditService_WithNilTransactionRunner_ReturnsError(t *testing.T) {
+	svc, err := NewDepositCreditService(nil, time.Second)
 
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
-
-	if credited {
-		t.Fatal("expected credited=false, got true")
-	}
-
-	if !strings.Contains(err.Error(), "transaction runner is nil") {
-		t.Fatalf("expected transaction runner error, got %q", err.Error())
+	if svc != nil {
+		t.Fatal("expected service to be nil")
 	}
 }
 
@@ -64,7 +57,7 @@ func TestDepositCreditService_CreditNext_WhenNoCreditableDeposit_ReturnsFalse(t 
 		},
 	}
 
-	svc := NewDepositCreditService(tx)
+	svc, err := NewDepositCreditService(tx, time.Second)
 
 	credited, err := svc.CreditNext(context.Background(), 11155111)
 
@@ -111,7 +104,7 @@ func TestDepositCreditService_CreditNext_Success(t *testing.T) {
 		},
 	}
 
-	svc := NewDepositCreditService(tx)
+	svc, err := NewDepositCreditService(tx, time.Second)
 
 	credited, err := svc.CreditNext(context.Background(), 11155111)
 
@@ -219,7 +212,7 @@ func TestDepositCreditService_CreditNext_WhenLedgerAlreadyExists_ReturnsErrorAnd
 		},
 	}
 
-	svc := NewDepositCreditService(tx)
+	svc, err := NewDepositCreditService(tx, time.Second)
 
 	credited, err := svc.CreditNext(context.Background(), 11155111)
 
@@ -270,7 +263,7 @@ func TestDepositCreditService_CreditNext_WhenAddAvailableBalanceFails_DoesNotMar
 		},
 	}
 
-	svc := NewDepositCreditService(tx)
+	svc, err := NewDepositCreditService(tx, time.Second)
 
 	credited, err := svc.CreditNext(context.Background(), 11155111)
 
@@ -322,7 +315,7 @@ func TestDepositCreditService_CreditNext_WhenMarkDepositCreditedFails_ReturnsErr
 		},
 	}
 
-	svc := NewDepositCreditService(tx)
+	svc, err := NewDepositCreditService(tx, time.Second)
 
 	credited, err := svc.CreditNext(context.Background(), 11155111)
 

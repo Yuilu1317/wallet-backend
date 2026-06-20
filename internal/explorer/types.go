@@ -1,9 +1,5 @@
 package explorer
 
-type SyncStatusRequest struct {
-	ChainID int64
-}
-
 type SyncStatusResponse struct {
 	ChainID              int64                  `json:"chain_id"`
 	SyncTarget           string                 `json:"sync_target"`

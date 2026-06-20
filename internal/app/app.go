@@ -4,29 +4,26 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"net/http"
 	"time"
 
 	"github.com/Yuilu1317/wallet-backend/internal/config"
+	"github.com/Yuilu1317/wallet-backend/internal/controller"
 	walletdb "github.com/Yuilu1317/wallet-backend/internal/db"
 	"github.com/Yuilu1317/wallet-backend/internal/db/repo"
 	"github.com/Yuilu1317/wallet-backend/internal/explorer"
+	"github.com/Yuilu1317/wallet-backend/internal/router"
 	"github.com/Yuilu1317/wallet-backend/internal/scanner"
 	"github.com/Yuilu1317/wallet-backend/internal/service"
+	"github.com/Yuilu1317/wallet-backend/internal/worker"
+	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
 )
 
-type DepositScanner interface {
-	ScanOnce(ctx context.Context) error
-}
-
-type DepositCreditService interface {
-	CreditNext(ctx context.Context, chainID int64) (bool, error)
-}
 type App struct {
-	cfg                     *config.Config
-	walletDB                *gorm.DB
-	nativeETHDepositScanner DepositScanner
-	depositCreditService    DepositCreditService
+	cfg      *config.Config
+	walletDB *gorm.DB
+	engine   *gin.Engine
 }
 
 func New(configPath string) (*App, error) {
@@ -40,44 +37,86 @@ func New(configPath string) (*App, error) {
 		return nil, fmt.Errorf("open wallet database: %w", err)
 	}
 
-	explorerClient, err := explorer.NewHTTPClient(
-		cfg.Explorer.BaseURL,
-		time.Duration(cfg.Explorer.TimeoutSeconds)*time.Second,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("create explorer client: %w", err)
+	engine := gin.Default()
+
+	a := &App{
+		cfg:      cfg,
+		walletDB: walletDB,
+		engine:   engine,
 	}
 
-	scannerCursorRepo := repo.NewScannerCursorRepo(walletDB)
-	txRunner := repo.NewScannerTransactionRunner(walletDB)
+	if err := a.registerRoutes(); err != nil {
+		_ = a.Close()
+		return nil, err
+	}
+
+	return a, nil
+}
+
+func (a *App) registerRoutes() error {
+	explorerClient, err := explorer.NewHTTPClient(
+		a.cfg.Explorer.BaseURL,
+		time.Duration(a.cfg.Explorer.TimeoutSeconds)*time.Second,
+	)
+	if err != nil {
+		return fmt.Errorf("create explorer client: %w", err)
+	}
+
+	scannerCursorRepo := repo.NewScannerCursorRepo(a.walletDB)
+	scannerTxRunner := repo.NewScannerTransactionRunner(a.walletDB)
 
 	nativeETHDepositScanner, err := scanner.NewNativeETHDepositScanner(
 		scanner.Config{
-			ChainID:       cfg.Ethereum.ChainID,
-			ScannerName:   cfg.Scanner.Name,
-			StartBlock:    cfg.Scanner.StartBlock,
-			BatchSize:     cfg.Scanner.BatchSize,
-			MinDepositWei: cfg.Ethereum.MinDepositWei,
+			ChainID:           a.cfg.Ethereum.ChainID,
+			ScannerName:       a.cfg.Scanner.Name,
+			StartBlock:        a.cfg.Scanner.StartBlock,
+			BatchSize:         a.cfg.Scanner.BatchSize,
+			MinDepositWei:     a.cfg.Ethereum.MinDepositWei,
+			ConfirmationDepth: a.cfg.Ethereum.ConfirmationDepth,
+			DBTimeout:         time.Duration(a.cfg.Database.DBTimeoutSeconds) * time.Second,
 		},
 		explorerClient,
 		scannerCursorRepo,
-		txRunner,
+		scannerTxRunner,
 	)
 	if err != nil {
-		return nil, fmt.Errorf("create native eth deposit scanner: %w", err)
-
+		return fmt.Errorf("create native eth deposit scanner: %w", err)
 	}
 
-	depositCreditTxRunner := repo.NewDepositCreditTransactionRunner(walletDB)
-	depositCreditService := service.NewDepositCreditService(
+	scannerWorker, err := worker.NewNativeETHDepositScannerWorker(nativeETHDepositScanner)
+	if err != nil {
+		return fmt.Errorf("create scanner worker: %w", err)
+	}
+
+	depositCreditTxRunner := repo.NewDepositCreditTransactionRunner(a.walletDB)
+
+	depositCreditService, err := service.NewDepositCreditService(
 		depositCreditTxRunner,
+		time.Duration(a.cfg.Database.DBTimeoutSeconds)*time.Second,
 	)
-	return &App{
-		cfg:                     cfg,
-		walletDB:                walletDB,
-		nativeETHDepositScanner: nativeETHDepositScanner,
-		depositCreditService:    depositCreditService,
-	}, nil
+	if err != nil {
+		return fmt.Errorf("create deposit credit service: %w", err)
+	}
+
+	creditWorker, err := worker.NewCreditWorker(
+		a.cfg.Ethereum.ChainID,
+		depositCreditService,
+	)
+	if err != nil {
+		return fmt.Errorf("create credit worker: %w", err)
+	}
+
+	workerController, err := controller.NewWorkerController(
+		scannerWorker,
+		creditWorker,
+	)
+	if err != nil {
+		return fmt.Errorf("create worker controller: %w", err)
+	}
+
+	router.RegisterWorkerRoutes(a.engine, workerController)
+
+	return nil
 }
 
 func (a *App) Run(ctx context.Context) error {
@@ -90,30 +129,44 @@ func (a *App) Run(ctx context.Context) error {
 		a.cfg.Explorer.BaseURL,
 	)
 
-	log.Println("wallet database connected")
-	if err := a.nativeETHDepositScanner.ScanOnce(ctx); err != nil {
-		return fmt.Errorf("scan native eth deposits once: %w", err)
-	}
-	log.Println("native eth deposit scan once completed")
-	if a.depositCreditService == nil {
-		return fmt.Errorf("deposit credit service is nil")
-	}
-	credited, err := a.depositCreditService.CreditNext(ctx, a.cfg.Ethereum.ChainID)
-	if err != nil {
-		return fmt.Errorf("credit native eth deposit once: %w", err)
+	addr := ":" + a.cfg.App.HTTPPort
+
+	srv := &http.Server{
+		Addr:    addr,
+		Handler: a.engine,
 	}
 
-	if credited {
-		log.Println("native eth deposit credit once completed")
-	} else {
-		log.Println("no creditable native eth deposit found")
+	errCh := make(chan error, 1)
+
+	go func() {
+		log.Printf("http server listening on %s", addr)
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			errCh <- err
+			return
+		}
+		errCh <- nil
+	}()
+
+	select {
+	case <-ctx.Done():
+		log.Println("shutdown signal received")
+
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		if err := srv.Shutdown(shutdownCtx); err != nil {
+			return fmt.Errorf("shutdown http server: %w", err)
+		}
+
+		log.Println("server exited")
+		return nil
+
+	case err := <-errCh:
+		if err != nil {
+			return fmt.Errorf("http server error: %w", err)
+		}
+		return nil
 	}
-	log.Println("app is running, press Ctrl+C to stop")
-
-	<-ctx.Done()
-
-	log.Println("shutdown signal received")
-	return nil
 }
 
 func (a *App) Close() error {

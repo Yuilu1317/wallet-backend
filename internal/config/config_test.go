@@ -14,7 +14,8 @@ func validConfig() Config {
 			HTTPPort: "8081",
 		},
 		Database: DatabaseConfig{
-			DSN: "host=127.0.0.1 user=postgres password=test dbname=wallet_backend_dev port=5432 sslmode=disable",
+			DSN:              "host=127.0.0.1 user=postgres password=test dbname=wallet_backend_dev port=5432 sslmode=disable",
+			DBTimeoutSeconds: 5,
 		},
 		Ethereum: EthereumConfig{
 			ChainID:           11155111,
@@ -196,6 +197,7 @@ app:
 
 database:
   dsn: "${DATABASE_DSN}"
+  db_timeout_seconds : 5
 
 ethereum:
   chain_id: 11155111
@@ -303,6 +305,7 @@ app:
 
 database:
   dsn: "${DATABASE_DSN}"
+  db_timeout_seconds : 5
 
 ethereum:
   chain_id: 11155111

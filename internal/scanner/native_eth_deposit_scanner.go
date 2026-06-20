@@ -7,9 +7,11 @@ import (
 	"math/big"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/Yuilu1317/wallet-backend/internal/explorer"
 	"github.com/Yuilu1317/wallet-backend/internal/model"
+	"github.com/Yuilu1317/wallet-backend/internal/types"
 )
 
 // ExplorerClient defines the wallet-facing contract for reading completed chain data
@@ -58,6 +60,7 @@ type Config struct {
 	BatchSize         int
 	MinDepositWei     string
 	ConfirmationDepth int64
+	DBTimeout         time.Duration
 }
 
 type Repositories struct {
@@ -170,6 +173,10 @@ func validateConfig(cfg Config) error {
 		return fmt.Errorf("scanner.confirmation_depth must be non-negative")
 	}
 
+	if cfg.DBTimeout <= 0 {
+		return fmt.Errorf("scanner db timeout must be positive")
+	}
+
 	return nil
 }
 
@@ -183,16 +190,23 @@ func (s *NativeETHDepositScanner) ScanOnce(ctx context.Context) error {
 		return fmt.Errorf("validate sync status response: %w", err)
 	}
 
-	cursor, found, err := s.cursorRepo.GetByChainIDAndScannerName(ctx, s.cfg.ChainID, s.cfg.ScannerName)
+	cursorRepoCtx, cancel := s.createRepoCtx(ctx)
+	cursor, found, err := s.cursorRepo.GetByChainIDAndScannerName(cursorRepoCtx, s.cfg.ChainID, s.cfg.ScannerName)
 	if err != nil {
+		if mapped := types.MapDBContextError(ctx, cursorRepoCtx, err); mapped != nil {
+			cancel()
+			return fmt.Errorf("get scanner cursor: %w", mapped)
+		}
+		cancel()
 		return fmt.Errorf("get scanner cursor: %w", err)
 	}
+	cancel()
 
 	lastScannedBlock := s.cfg.StartBlock - 1
 	previousHash := ""
 	if found {
 		lastScannedBlock = cursor.LastScannedBlockNumber
-		previousHash = cursor.LastScannedBlockHash
+		previousHash = strings.TrimSpace(cursor.LastScannedBlockHash)
 	}
 
 	scanRange, shouldScan, err := PlanScanRange(
@@ -309,6 +323,9 @@ func (s *NativeETHDepositScanner) validateCompletedBlocksResponse(
 	}
 
 	for _, block := range resp.Blocks {
+		if strings.TrimSpace(block.Hash) == "" {
+			return fmt.Errorf("completed block hash is empty: block=%d", block.Number)
+		}
 		if block.Number > scanRange.ConfirmedTargetBlockNumber {
 			return fmt.Errorf(
 				"completed block exceeds confirmed target: block=%d confirmed_target_block=%d",
@@ -332,6 +349,9 @@ func (s *NativeETHDepositScanner) processBlocks(
 	})
 
 	for _, block := range blocks {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
 		if block.Number != expectedBlockNumber {
 			return fmt.Errorf(
 				"unexpected block number: got=%d expected=%d",
@@ -339,18 +359,33 @@ func (s *NativeETHDepositScanner) processBlocks(
 				expectedBlockNumber,
 			)
 		}
-		if previousHash != "" && block.ParentHash != previousHash {
-			return fmt.Errorf(
-				"block continuity check failed: block=%d parent_hash=%s expected_parent_hash=%s",
-				block.Number,
-				block.ParentHash,
-				previousHash,
-			)
+
+		blockHash := strings.TrimSpace(block.Hash)
+		if blockHash == "" {
+			return fmt.Errorf("completed block hash is empty: block=%d", block.Number)
 		}
+		block.Hash = blockHash
+
+		if previousHash != "" {
+			parentHash := strings.TrimSpace(block.ParentHash)
+			if parentHash == "" {
+				return fmt.Errorf("completed block parent_hash is empty: block=%d expected_parent_hash=%s", block.Number, previousHash)
+			}
+
+			if parentHash != previousHash {
+				return fmt.Errorf(
+					"block continuity check failed: block=%d parent_hash=%s expected_parent_hash=%s",
+					block.Number,
+					parentHash,
+					previousHash,
+				)
+			}
+		}
+
 		if err := s.processBlockInTransaction(ctx, block); err != nil {
 			return fmt.Errorf("process block in transaction %d: %w", block.Number, err)
 		}
-		previousHash = block.Hash
+		previousHash = blockHash
 		expectedBlockNumber = block.Number + 1
 	}
 	return nil
@@ -365,12 +400,18 @@ func (s *NativeETHDepositScanner) processBlockInTransaction(
 			return fmt.Errorf("process block: %w", err)
 		}
 
-		if err := repos.CursorRepo.UpsertAfterBlockProcessed(ctx, &model.WalletScannerCursor{
+		cursorRepoCtx, cancel := s.createRepoCtx(ctx)
+		defer cancel()
+		err := repos.CursorRepo.UpsertAfterBlockProcessed(cursorRepoCtx, &model.WalletScannerCursor{
 			ChainID:                s.cfg.ChainID,
 			ScannerName:            s.cfg.ScannerName,
 			LastScannedBlockNumber: block.Number,
 			LastScannedBlockHash:   block.Hash,
-		}); err != nil {
+		})
+		if err != nil {
+			if mapped := types.MapDBContextError(ctx, cursorRepoCtx, err); mapped != nil {
+				return fmt.Errorf("update scanner cursor: %w", mapped)
+			}
 			return fmt.Errorf("update scanner cursor: %w", err)
 		}
 
@@ -389,6 +430,27 @@ func (s *NativeETHDepositScanner) processBlock(
 		}
 	}
 	return nil
+}
+
+func (s *NativeETHDepositScanner) findActiveByChainIDAndAddressLower(
+	ctx context.Context,
+	repos Repositories,
+	toAddressLower string,
+) (*model.DepositAddress, bool, error) {
+	depositAddressRepoCtx, cancel := s.createRepoCtx(ctx)
+	defer cancel()
+	depositAddress, found, err := repos.DepositAddressRepo.FindActiveByChainIDAndAddressLower(
+		depositAddressRepoCtx,
+		s.cfg.ChainID,
+		toAddressLower,
+	)
+	if err != nil {
+		if mapped := types.MapDBContextError(ctx, depositAddressRepoCtx, err); mapped != nil {
+			return nil, false, fmt.Errorf("find active deposit address: %w", mapped)
+		}
+		return nil, false, fmt.Errorf("find active deposit address: %w", err)
+	}
+	return depositAddress, found, nil
 }
 
 func (s *NativeETHDepositScanner) processTransaction(
@@ -423,14 +485,11 @@ func (s *NativeETHDepositScanner) processTransaction(
 		return nil
 	}
 
-	depositAddress, found, err := repos.DepositAddressRepo.FindActiveByChainIDAndAddressLower(
-		ctx,
-		s.cfg.ChainID,
-		toAddressLower,
-	)
+	depositAddress, found, err := s.findActiveByChainIDAndAddressLower(ctx, repos, toAddressLower)
 	if err != nil {
-		return fmt.Errorf("find active deposit address: %w", err)
+		return err
 	}
+
 	if !found {
 		return nil
 	}
@@ -448,10 +507,17 @@ func (s *NativeETHDepositScanner) processTransaction(
 		Status:           model.DepositStatusConfirming,
 		ReceiptStatus:    tx.ReceiptStatus,
 	}
-	created, err := repos.DepositRepo.CreateConfirmingDepositIdempotently(ctx, deposit)
+
+	depositRepoCtx, cancel := s.createRepoCtx(ctx)
+	defer cancel()
+	created, err := repos.DepositRepo.CreateConfirmingDepositIdempotently(depositRepoCtx, deposit)
 	if err != nil {
+		if mapper := types.MapDBContextError(ctx, depositRepoCtx, err); mapper != nil {
+			return fmt.Errorf("create confirming deposit idempotently: %w", mapper)
+		}
 		return fmt.Errorf("create confirming deposit idempotently: %w", err)
 	}
+
 	if created {
 		log.Printf(
 			"native eth deposit created: chain_id=%d user_id=%d deposit_address_id=%d tx_hash=%s block_number=%d amount_wei=%s",
@@ -478,4 +544,8 @@ func parseNonNegativeWei(value string) (*big.Int, error) {
 	}
 
 	return amount, nil
+}
+
+func (s *NativeETHDepositScanner) createRepoCtx(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeoutCause(ctx, s.cfg.DBTimeout, types.ErrDBTimeout)
 }

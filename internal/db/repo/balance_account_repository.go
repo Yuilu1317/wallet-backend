@@ -26,7 +26,7 @@ func (r *BalanceAccountRepository) AddAvailableBalance(
 		return err
 	}
 
-	amountWei := account.AvailableBalance
+	//amountWei := account.AvailableBalance
 
 	result := r.db.WithContext(ctx).
 		Clauses(clause.OnConflict{
@@ -36,7 +36,7 @@ func (r *BalanceAccountRepository) AddAvailableBalance(
 				{Name: "asset_symbol"},
 			},
 			DoUpdates: clause.Assignments(map[string]interface{}{
-				"available_balance": gorm.Expr("available_balance + CAST(? AS NUMERIC)", amountWei),
+				"available_balance": gorm.Expr(`"balance_accounts"."available_balance" + EXCLUDED."available_balance"`),
 				"updated_at":        gorm.Expr("now()"),
 			}),
 		}).
