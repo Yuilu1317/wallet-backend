@@ -15,12 +15,12 @@ scanner:
   name: native_eth_deposit_scanner
   start_block: 11008017
   batch_size: 10
-  poll_interval_seconds: 5
 
 explorer:
   base_url: "http://localhost:8080"
   timeout_seconds: 5
 
-worker :
-  worker.scanner_run_once_timeout_seconds: 60
-  worker.credit_run_once_timeout_seconds: 60
+worker:
+  interval_seconds: 5
+  scanner_run_once_timeout_seconds: 60
+  credit_run_once_timeout_seconds: 60

@@ -14,6 +14,7 @@ type Config struct {
 	Ethereum EthereumConfig `yaml:"ethereum"`
 	Scanner  ScannerConfig  `yaml:"scanner"`
 	Explorer ExplorerConfig `yaml:"explorer"`
+	Worker   WorkerConfig   `yaml:"worker"`
 }
 
 type AppConfig struct {
@@ -33,15 +34,20 @@ type EthereumConfig struct {
 }
 
 type ScannerConfig struct {
-	Name                string `yaml:"name"`
-	StartBlock          int64  `yaml:"start_block"`
-	BatchSize           int    `yaml:"batch_size"`
-	PollIntervalSeconds int    `yaml:"poll_interval_seconds"`
+	Name       string `yaml:"name"`
+	StartBlock int64  `yaml:"start_block"`
+	BatchSize  int    `yaml:"batch_size"`
 }
 
 type ExplorerConfig struct {
 	BaseURL        string `yaml:"base_url"`
 	TimeoutSeconds int    `yaml:"timeout_seconds"`
+}
+
+type WorkerConfig struct {
+	IntervalSeconds              int `yaml:"interval_seconds"`
+	ScannerRunOnceTimeoutSeconds int `yaml:"scanner_run_once_timeout_seconds"`
+	CreditRunOnceTimeoutSeconds  int `yaml:"credit_run_once_timeout_seconds"`
 }
 
 func Load(path string) (*Config, error) {
@@ -106,15 +112,23 @@ func (c *Config) Validate() error {
 		return err
 	}
 
-	if err := validatePositiveInt("scanner.poll_interval_seconds", c.Scanner.PollIntervalSeconds); err != nil {
-		return err
-	}
-
 	if err := validateRequiredString("explorer.base_url", c.Explorer.BaseURL); err != nil {
 		return err
 	}
 
 	if err := validatePositiveInt("explorer.timeout_seconds", c.Explorer.TimeoutSeconds); err != nil {
+		return err
+	}
+
+	if err := validatePositiveInt("worker.interval_seconds", c.Worker.IntervalSeconds); err != nil {
+		return err
+	}
+
+	if err := validatePositiveInt("worker.scanner_run_once_timeout_seconds", c.Worker.ScannerRunOnceTimeoutSeconds); err != nil {
+		return err
+	}
+
+	if err := validatePositiveInt("worker.credit_run_once_timeout_seconds", c.Worker.CreditRunOnceTimeoutSeconds); err != nil {
 		return err
 	}
 

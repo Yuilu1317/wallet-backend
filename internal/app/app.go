@@ -24,6 +24,11 @@ type App struct {
 	cfg      *config.Config
 	walletDB *gorm.DB
 	engine   *gin.Engine
+
+	rootCtx    context.Context
+	rootCancel context.CancelFunc
+
+	workerRunners []*worker.Runner
 }
 
 func New(configPath string) (*App, error) {
@@ -39,10 +44,14 @@ func New(configPath string) (*App, error) {
 
 	engine := gin.Default()
 
+	rootCtx, rootCancel := context.WithCancel(context.Background())
+
 	a := &App{
-		cfg:      cfg,
-		walletDB: walletDB,
-		engine:   engine,
+		cfg:        cfg,
+		walletDB:   walletDB,
+		engine:     engine,
+		rootCtx:    rootCtx,
+		rootCancel: rootCancel,
 	}
 
 	if err := a.registerRoutes(); err != nil {
@@ -106,9 +115,35 @@ func (a *App) registerRoutes() error {
 		return fmt.Errorf("create credit worker: %w", err)
 	}
 
-	workerController, err := controller.NewWorkerController(
+	nativeETHDepositScannerRunner, err := worker.NewRunner(
+		"native_eth_deposit_scanner",
 		scannerWorker,
+		time.Duration(a.cfg.Worker.IntervalSeconds)*time.Second,
+		time.Duration(a.cfg.Worker.ScannerRunOnceTimeoutSeconds)*time.Second,
+	)
+	if err != nil {
+		return fmt.Errorf("create native eth deposit scanner runner: %w", err)
+	}
+
+	nativeETHDepositCreditRunner, err := worker.NewRunner(
+		"native_eth_deposit_credit",
 		creditWorker,
+		time.Duration(a.cfg.Worker.IntervalSeconds)*time.Second,
+		time.Duration(a.cfg.Worker.CreditRunOnceTimeoutSeconds)*time.Second,
+	)
+	if err != nil {
+		return fmt.Errorf("create native eth deposit credit runner: %w", err)
+	}
+
+	a.workerRunners = []*worker.Runner{
+		nativeETHDepositScannerRunner,
+		nativeETHDepositCreditRunner,
+	}
+
+	workerController, err := controller.NewWorkerController(
+		a.rootCtx,
+		nativeETHDepositScannerRunner,
+		nativeETHDepositCreditRunner,
 	)
 	if err != nil {
 		return fmt.Errorf("create worker controller: %w", err)
@@ -151,11 +186,22 @@ func (a *App) Run(ctx context.Context) error {
 	case <-ctx.Done():
 		log.Println("shutdown signal received")
 
+		if a.rootCancel != nil {
+			a.rootCancel()
+		}
+
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 
 		if err := srv.Shutdown(shutdownCtx); err != nil {
 			return fmt.Errorf("shutdown http server: %w", err)
+		}
+
+		waitCtx, waitCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer waitCancel()
+
+		if err := a.waitWorkerRunners(waitCtx); err != nil {
+			log.Printf("wait worker runners: %v", err)
 		}
 
 		log.Println("server exited")
@@ -170,6 +216,18 @@ func (a *App) Run(ctx context.Context) error {
 }
 
 func (a *App) Close() error {
+	if a.rootCancel != nil {
+		a.rootCancel()
+		a.rootCancel = nil
+	}
+
+	waitCtx, waitCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer waitCancel()
+
+	if err := a.waitWorkerRunners(waitCtx); err != nil {
+		log.Printf("wait worker runners before close: %v", err)
+	}
+
 	if a.walletDB == nil {
 		return nil
 	}
@@ -179,5 +237,19 @@ func (a *App) Close() error {
 	}
 
 	log.Println("wallet database closed")
+	return nil
+}
+
+func (a *App) waitWorkerRunners(ctx context.Context) error {
+	for _, runner := range a.workerRunners {
+		if runner == nil {
+			continue
+		}
+
+		if err := runner.Wait(ctx); err != nil {
+			return err
+		}
+	}
+
 	return nil
 }

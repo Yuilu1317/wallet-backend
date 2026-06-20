@@ -30,10 +30,9 @@ func validConfig() *config.Config {
 			MinDepositWei:     "1",
 		},
 		Scanner: config.ScannerConfig{
-			Name:                "native_eth_deposit_scanner",
-			StartBlock:          0,
-			BatchSize:           10,
-			PollIntervalSeconds: 5,
+			Name:       "native_eth_deposit_scanner",
+			StartBlock: 0,
+			BatchSize:  10,
 		},
 		Explorer: config.ExplorerConfig{
 			BaseURL:        "http://localhost:8080",

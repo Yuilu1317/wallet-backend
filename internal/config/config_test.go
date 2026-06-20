@@ -23,14 +23,18 @@ func validConfig() Config {
 			MinDepositWei:     "1",
 		},
 		Scanner: ScannerConfig{
-			Name:                "native_eth_deposit_scanner",
-			StartBlock:          0,
-			BatchSize:           10,
-			PollIntervalSeconds: 5,
+			Name:       "native_eth_deposit_scanner",
+			StartBlock: 0,
+			BatchSize:  10,
 		},
 		Explorer: ExplorerConfig{
 			BaseURL:        "http://localhost:8080",
 			TimeoutSeconds: 5,
+		},
+		Worker: WorkerConfig{
+			IntervalSeconds:              5,
+			ScannerRunOnceTimeoutSeconds: 60,
+			CreditRunOnceTimeoutSeconds:  60,
 		},
 	}
 }
@@ -144,13 +148,6 @@ func TestConfigValidate_WithInvalidConfig_ReturnsError(t *testing.T) {
 			wantErr: "scanner.batch_size must be positive",
 		},
 		{
-			name: "non-positive scanner poll interval",
-			mutate: func(cfg *Config) {
-				cfg.Scanner.PollIntervalSeconds = 0
-			},
-			wantErr: "scanner.poll_interval_seconds must be positive",
-		},
-		{
 			name: "missing explorer base url",
 			mutate: func(cfg *Config) {
 				cfg.Explorer.BaseURL = ""
@@ -208,11 +205,15 @@ scanner:
   name: native_eth_deposit_scanner
   start_block: 0
   batch_size: 10
-  poll_interval_seconds: 5
 
 explorer:
   base_url: "http://localhost:8080"
   timeout_seconds: 5
+
+worker:
+  interval_seconds: 5
+  scanner_run_once_timeout_seconds: 60
+  credit_run_once_timeout_seconds: 60
 `)
 
 	cfg, err := Load(configPath)
@@ -316,11 +317,15 @@ scanner:
   name: native_eth_deposit_scanner
   start_block: 0
   batch_size: 10
-  poll_interval_seconds: 5
 
 explorer:
   base_url: "http://localhost:8080"
   timeout_seconds: 5
+
+worker:
+  interval_seconds: 5
+  scanner_run_once_timeout_seconds: 60
+  credit_run_once_timeout_seconds: 60
 `)
 
 	cfg, err := Load(configPath)
