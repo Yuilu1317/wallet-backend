@@ -14,6 +14,7 @@ import (
 
 type HTTPClient struct {
 	baseURL string
+	timeout time.Duration
 	client  *http.Client
 }
 
@@ -32,7 +33,11 @@ func NewHTTPClient(baseURL string, timeout time.Duration) (*HTTPClient, error) {
 	if timeout <= 0 {
 		return nil, fmt.Errorf("explorer timeout must be positive")
 	}
-	return &HTTPClient{baseURL: baseURL, client: &http.Client{Timeout: timeout}}, nil
+	return &HTTPClient{
+		baseURL: baseURL,
+		timeout: timeout,
+		client:  &http.Client{},
+	}, nil
 }
 
 const SyncStatusPath = "/internal/wallet/sync-status"
@@ -47,17 +52,18 @@ func (c *HTTPClient) GetSyncStatus(
 
 	endpoint, err := c.buildSyncStatusURL(chainID)
 	if err != nil {
-		return nil, fmt.Errorf("build sync status block url: %w", err)
+		return nil, fmt.Errorf("build sync status url: %w", err)
 	}
-
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	reqCtx, cancel := context.WithTimeout(ctx, c.timeout)
+	defer cancel()
+	httpReq, err := http.NewRequestWithContext(reqCtx, http.MethodGet, endpoint, nil)
 	if err != nil {
-		return nil, fmt.Errorf("create sync status block request: %w", err)
+		return nil, fmt.Errorf("create sync status request: %w", err)
 	}
 
 	resp, err := c.client.Do(httpReq)
 	if err != nil {
-		return nil, fmt.Errorf("request sync status block: chain_id=%d: %w", chainID, err)
+		return nil, fmt.Errorf("request sync status: chain_id=%d: %w", chainID, err)
 	}
 	defer resp.Body.Close()
 
@@ -116,7 +122,10 @@ func (c *HTTPClient) ListCompletedBlocks(
 		return nil, fmt.Errorf("build completed blocks url: %w", err)
 	}
 
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	reqCtx, cancel := context.WithTimeout(ctx, c.timeout)
+	defer cancel()
+
+	httpReq, err := http.NewRequestWithContext(reqCtx, http.MethodGet, endpoint, nil)
 	if err != nil {
 		return nil, fmt.Errorf("create completed blocks request: %w", err)
 	}

@@ -85,7 +85,7 @@ func TestNewHTTPClient(t *testing.T) {
 				t.Fatal("expected http client, got nil")
 			}
 
-			if client.client.Timeout != tt.timeout {
+			if client.timeout != tt.timeout {
 				t.Fatalf("expected timeout %v, got %v", tt.timeout, client.client.Timeout)
 			}
 		})
