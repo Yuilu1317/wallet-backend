@@ -31,6 +31,11 @@ type App struct {
 	workerRunners []*worker.Runner
 }
 
+const (
+	WorkerNativeETHDepositScanner = "native_eth_deposit_scanner"
+	WorkerNativeETHDepositCredit  = "native_eth_deposit_credit"
+)
+
 func New(configPath string) (*App, error) {
 	cfg, err := config.Load(configPath)
 	if err != nil {
@@ -54,7 +59,7 @@ func New(configPath string) (*App, error) {
 		rootCancel: rootCancel,
 	}
 
-	if err := a.registerRoutes(); err != nil {
+	if err := a.buildDependencies(); err != nil {
 		_ = a.Close()
 		return nil, err
 	}
@@ -62,7 +67,7 @@ func New(configPath string) (*App, error) {
 	return a, nil
 }
 
-func (a *App) registerRoutes() error {
+func (a *App) buildDependencies() error {
 	explorerClient, err := explorer.NewHTTPClient(
 		a.cfg.Explorer.BaseURL,
 		time.Duration(a.cfg.Explorer.TimeoutSeconds)*time.Second,
@@ -142,15 +147,24 @@ func (a *App) registerRoutes() error {
 
 	workerController, err := controller.NewWorkerController(
 		a.rootCtx,
-		nativeETHDepositScannerRunner,
-		nativeETHDepositCreditRunner,
+		map[string]controller.WorkerRunner{
+			WorkerNativeETHDepositScanner: nativeETHDepositScannerRunner,
+			WorkerNativeETHDepositCredit:  nativeETHDepositCreditRunner,
+		},
 	)
 	if err != nil {
 		return fmt.Errorf("create worker controller: %w", err)
 	}
 
-	router.RegisterWorkerRoutes(a.engine, workerController)
+	if err := a.registerRoutes(workerController); err != nil {
+		return fmt.Errorf("register routes: %w", err)
+	}
 
+	return nil
+}
+
+func (a *App) registerRoutes(workerController *controller.WorkerController) error {
+	router.RegisterWorkerRoutes(a.engine, workerController)
 	return nil
 }
 
@@ -197,13 +211,6 @@ func (a *App) Run(ctx context.Context) error {
 			return fmt.Errorf("shutdown http server: %w", err)
 		}
 
-		waitCtx, waitCancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer waitCancel()
-
-		if err := a.waitWorkerRunners(waitCtx); err != nil {
-			log.Printf("wait worker runners: %v", err)
-		}
-
 		log.Println("server exited")
 		return nil
 
@@ -235,6 +242,8 @@ func (a *App) Close() error {
 	if err := walletdb.Close(a.walletDB); err != nil {
 		return fmt.Errorf("close wallet database: %w", err)
 	}
+
+	a.walletDB = nil
 
 	log.Println("wallet database closed")
 	return nil

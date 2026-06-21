@@ -18,120 +18,118 @@ type WorkerRunner interface {
 
 type WorkerController struct {
 	rootCtx context.Context
-
-	nativeETHDepositScannerRunner WorkerRunner
-	nativeETHDepositCreditRunner  WorkerRunner
+	runners map[string]WorkerRunner
 }
 
 func NewWorkerController(
 	rootCtx context.Context,
-	nativeETHDepositScannerRunner WorkerRunner,
-	nativeETHDepositCreditRunner WorkerRunner,
+	runners map[string]WorkerRunner,
 ) (*WorkerController, error) {
 	if rootCtx == nil {
 		return nil, fmt.Errorf("root context is nil")
 	}
-	if nativeETHDepositScannerRunner == nil {
-		return nil, fmt.Errorf("native eth deposit scanner runner is required")
+	if len(runners) == 0 {
+		return nil, fmt.Errorf("runners is empty")
 	}
-	if nativeETHDepositCreditRunner == nil {
-		return nil, fmt.Errorf("native eth deposit credit runner is required")
+	copied := make(map[string]WorkerRunner, len(runners))
+	for name, runner := range runners {
+		if name == "" {
+			return nil, fmt.Errorf("worker name is empty")
+		}
+		if runner == nil {
+			return nil, fmt.Errorf("runner %s is nil", name)
+		}
+		copied[name] = runner
 	}
+
 	return &WorkerController{
-		rootCtx:                       rootCtx,
-		nativeETHDepositScannerRunner: nativeETHDepositScannerRunner,
-		nativeETHDepositCreditRunner:  nativeETHDepositCreditRunner,
+		rootCtx: rootCtx,
+		runners: copied,
 	}, nil
 }
 
-func (c *WorkerController) RunNativeETHDepositScannerOnce(ctx *gin.Context) {
-	if err := c.nativeETHDepositScannerRunner.RunOnce(ctx.Request.Context()); err != nil {
+func (c *WorkerController) getRunner(ctx *gin.Context) (WorkerRunner, string, bool) {
+	name := ctx.Param("name")
+
+	runner, ok := c.runners[name]
+	if !ok {
+		ctx.JSON(http.StatusNotFound, gin.H{
+			"error":  "worker not found",
+			"worker": name,
+		})
+		return nil, name, false
+	}
+
+	return runner, name, true
+}
+
+func (c *WorkerController) RunOnce(ctx *gin.Context) {
+	runner, name, ok := c.getRunner(ctx)
+	if !ok {
+		return
+	}
+
+	if err := runner.RunOnce(ctx.Request.Context()); err != nil {
 		ctx.JSON(http.StatusInternalServerError, gin.H{
-			"error": err.Error(),
+			"error":  err.Error(),
+			"worker": name,
 		})
 		return
 	}
 
 	ctx.JSON(http.StatusOK, gin.H{
 		"status": "completed",
-		"worker": "native_eth_deposit_scanner",
+		"worker": name,
 	})
 }
 
-func (c *WorkerController) StartNativeETHDepositScanner(ctx *gin.Context) {
-	if err := c.nativeETHDepositScannerRunner.Start(c.rootCtx); err != nil {
-		ctx.JSON(http.StatusConflict, gin.H{
-			"error": err.Error(),
+func (c *WorkerController) Start(ctx *gin.Context) {
+	runner, name, ok := c.getRunner(ctx)
+	if !ok {
+		return
+	}
+
+	if err := runner.Start(c.rootCtx); err != nil {
+		ctx.JSON(http.StatusInternalServerError, gin.H{
+			"error":  err.Error(),
+			"worker": name,
 		})
 		return
 	}
 
 	ctx.JSON(http.StatusOK, gin.H{
 		"status": "started",
-		"worker": "native_eth_deposit_scanner",
+		"worker": name,
 	})
 }
 
-func (c *WorkerController) StopNativeETHDepositScanner(ctx *gin.Context) {
-	if err := c.nativeETHDepositScannerRunner.Stop(); err != nil {
+func (c *WorkerController) Stop(ctx *gin.Context) {
+	runner, name, ok := c.getRunner(ctx)
+	if !ok {
+		return
+	}
+
+	if err := runner.Stop(); err != nil {
 		ctx.JSON(http.StatusInternalServerError, gin.H{
-			"error": err.Error(),
+			"error":  err.Error(),
+			"worker": name,
 		})
 		return
 	}
 
 	ctx.JSON(http.StatusOK, gin.H{
 		"status": "stopping",
-		"worker": "native_eth_deposit_scanner",
+		"worker": name,
 	})
 }
 
-func (c *WorkerController) GetNativeETHDepositScannerStatus(ctx *gin.Context) {
-	ctx.JSON(http.StatusOK, c.nativeETHDepositScannerRunner.Status())
-}
-
-func (c *WorkerController) RunNativeETHDepositCreditOnce(ctx *gin.Context) {
-	if err := c.nativeETHDepositCreditRunner.RunOnce(ctx.Request.Context()); err != nil {
-		ctx.JSON(http.StatusInternalServerError, gin.H{
-			"error": err.Error(),
-		})
-		return
+func (c *WorkerController) Status(ctx *gin.Context) {
+	result := make(map[string]worker.RunnerStatus, len(c.runners))
+	for name, runner := range c.runners {
+		result[name] = runner.Status()
 	}
 
 	ctx.JSON(http.StatusOK, gin.H{
-		"status": "completed",
-		"worker": "native_eth_deposit_credit",
+		"workers": result,
 	})
-}
-
-func (c *WorkerController) StartNativeETHDepositCredit(ctx *gin.Context) {
-	if err := c.nativeETHDepositCreditRunner.Start(c.rootCtx); err != nil {
-		ctx.JSON(http.StatusConflict, gin.H{
-			"error": err.Error(),
-		})
-		return
-	}
-
-	ctx.JSON(http.StatusOK, gin.H{
-		"status": "started",
-		"worker": "native_eth_deposit_credit",
-	})
-}
-
-func (c *WorkerController) StopNativeETHDepositCredit(ctx *gin.Context) {
-	if err := c.nativeETHDepositCreditRunner.Stop(); err != nil {
-		ctx.JSON(http.StatusInternalServerError, gin.H{
-			"error": err.Error(),
-		})
-		return
-	}
-
-	ctx.JSON(http.StatusOK, gin.H{
-		"status": "stopping",
-		"worker": "native_eth_deposit_credit",
-	})
-}
-
-func (c *WorkerController) GetNativeETHDepositCreditStatus(ctx *gin.Context) {
-	ctx.JSON(http.StatusOK, c.nativeETHDepositCreditRunner.Status())
 }

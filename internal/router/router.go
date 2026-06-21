@@ -5,42 +5,15 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-func RegisterWorkerRoutes(r *gin.Engine, workerController *controller.WorkerController) {
-	group := r.Group("/admin/workers")
+func RegisterWorkerRoutes(engine *gin.Engine, workerController *controller.WorkerController) {
+	admin := engine.Group("/admin")
 
-	// native ETH deposit scanner
-	group.POST(
-		"/native-eth-deposit-scanner/run-once",
-		workerController.RunNativeETHDepositScannerOnce,
-	)
-	group.POST(
-		"/native-eth-deposit-scanner/start",
-		workerController.StartNativeETHDepositScanner,
-	)
-	group.POST(
-		"/native-eth-deposit-scanner/stop",
-		workerController.StopNativeETHDepositScanner,
-	)
-	group.GET(
-		"/native-eth-deposit-scanner/status",
-		workerController.GetNativeETHDepositScannerStatus,
-	)
+	workers := admin.Group("/workers")
+	{
+		workers.POST("/:name/run-once", workerController.RunOnce)
+		workers.POST("/:name/start", workerController.Start)
+		workers.POST("/:name/stop", workerController.Stop)
 
-	// native ETH deposit credit
-	group.POST(
-		"/native-eth-deposit-credit/run-once",
-		workerController.RunNativeETHDepositCreditOnce,
-	)
-	group.POST(
-		"/native-eth-deposit-credit/start",
-		workerController.StartNativeETHDepositCredit,
-	)
-	group.POST(
-		"/native-eth-deposit-credit/stop",
-		workerController.StopNativeETHDepositCredit,
-	)
-	group.GET(
-		"/native-eth-deposit-credit/status",
-		workerController.GetNativeETHDepositCreditStatus,
-	)
+		workers.GET("/status", workerController.Status)
+	}
 }

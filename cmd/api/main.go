@@ -32,13 +32,14 @@ func main() {
 		log.Fatalf("initialize app: %v", err)
 	}
 
-	defer func() {
-		if err := application.Close(); err != nil {
-			log.Printf("close app: %v", err)
-		}
-	}()
+	runErr := application.Run(ctx)
 
-	if err := application.Run(ctx); err != nil {
-		log.Fatalf("run app: %v", err)
+	closeErr := application.Close()
+	if closeErr != nil {
+		log.Printf("close app: %v", closeErr)
+	}
+
+	if runErr != nil {
+		log.Fatalf("run app: %v", runErr)
 	}
 }
