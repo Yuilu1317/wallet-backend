@@ -121,7 +121,7 @@ func (a *App) buildDependencies() error {
 	}
 
 	nativeETHDepositScannerRunner, err := worker.NewRunner(
-		"native_eth_deposit_scanner",
+		WorkerNativeETHDepositScanner,
 		scannerWorker,
 		time.Duration(a.cfg.Worker.IntervalSeconds)*time.Second,
 		time.Duration(a.cfg.Worker.ScannerRunOnceTimeoutSeconds)*time.Second,
@@ -131,7 +131,7 @@ func (a *App) buildDependencies() error {
 	}
 
 	nativeETHDepositCreditRunner, err := worker.NewRunner(
-		"native_eth_deposit_credit",
+		WorkerNativeETHDepositCredit,
 		creditWorker,
 		time.Duration(a.cfg.Worker.IntervalSeconds)*time.Second,
 		time.Duration(a.cfg.Worker.CreditRunOnceTimeoutSeconds)*time.Second,
