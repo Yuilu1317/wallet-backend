@@ -3,155 +3,17 @@ package service_test
 import (
 	"context"
 	"errors"
-	"fmt"
 	"math/big"
-	"net/url"
-	"os"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/Yuilu1317/wallet-backend/internal/db/repo"
+	"github.com/Yuilu1317/wallet-backend/internal/integration/testutil"
 	"github.com/Yuilu1317/wallet-backend/internal/model"
 	"github.com/Yuilu1317/wallet-backend/internal/service"
-	"github.com/joho/godotenv"
-	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 )
-
-func replacePostgresDSNDatabase(t *testing.T, dsn string, dbname string) string {
-	t.Helper()
-
-	if strings.HasPrefix(dsn, "postgres://") || strings.HasPrefix(dsn, "postgresql://") {
-		u, err := url.Parse(dsn)
-		if err != nil {
-			t.Fatalf("parse url dsn: %v", err)
-		}
-		u.Path = "/" + dbname
-		return u.String()
-	}
-
-	parts := strings.Fields(dsn)
-	replace := false
-
-	for i, part := range parts {
-		if strings.HasPrefix(part, "dbname=") {
-			parts[i] = "dbname=" + dbname
-			replace = true
-			break
-		}
-	}
-	if !replace {
-		parts = append(parts, "dbname="+dbname)
-	}
-	return strings.Join(parts, " ")
-}
-
-func migrateTestTables(t *testing.T, db *gorm.DB) {
-	t.Helper()
-
-	sqlByte, err := os.ReadFile("../../migrations/001_init_schema.sql")
-	if err != nil {
-		t.Fatalf("read migration: %v", err)
-	}
-
-	if err := db.Exec(string(sqlByte)).Error; err != nil {
-		t.Fatalf("migration test tables: %v", err)
-	}
-}
-
-func loadTestEnv(t *testing.T) {
-	t.Helper()
-
-	_ = godotenv.Load("../../.env.test")
-}
-
-func createTempPostgresTestDB(t *testing.T) *gorm.DB {
-	t.Helper()
-
-	loadTestEnv(t)
-
-	adminDSN := strings.TrimSpace(os.Getenv("TEST_ADMIN_DSN"))
-	if adminDSN == "" {
-		t.Skip("admin dsn is not set")
-	}
-
-	adminDB, err := gorm.Open(postgres.Open(adminDSN), &gorm.Config{})
-	if err != nil {
-		t.Fatalf("open admin db: %v", err)
-	}
-
-	adminSQLDB, err := adminDB.DB()
-	if err != nil {
-		t.Fatalf("open admin sql db: %v", err)
-	}
-
-	t.Cleanup(func() {
-		_ = adminSQLDB.Close()
-	})
-
-	testDBName := fmt.Sprintf(
-		"wallet_backend_test_%d_%d",
-		time.Now().UnixNano(),
-		os.Getpid())
-
-	if err := adminDB.Exec(`CREATE DATABASE "` + testDBName + `"`).Error; err != nil {
-		t.Fatalf("create test db: %v", err)
-	}
-
-	testDSN := replacePostgresDSNDatabase(t, adminDSN, testDBName)
-
-	testDB, err := gorm.Open(postgres.Open(testDSN), &gorm.Config{})
-	if err != nil {
-		t.Fatalf("open test db: %v", err)
-	}
-
-	testSQLDB, err := testDB.DB()
-	if err != nil {
-		t.Fatalf("open test sql db: %v", err)
-	}
-
-	if err := testSQLDB.Ping(); err != nil {
-		t.Fatalf("ping test sql db: %v", err)
-	}
-
-	t.Cleanup(func() {
-		_ = testSQLDB.Close()
-
-		_ = adminDB.Exec(`
-SELECT pg_terminate_backend(pid)
-FROM pg_stat_activity
-WHERE datname = ?
-AND pid <> pg_backend_pid()
-`, testDBName).Error
-
-		if err := adminDB.Exec(`DROP DATABASE IF EXISTS "` + testDBName + `"`).Error; err != nil {
-			t.Fatalf("drop temp test db %s: %v", testDBName, err)
-		}
-	})
-
-	migrateTestTables(t, testDB)
-
-	return testDB
-}
-
-func TestCreateTempPostgresTestDB_MigratesTables(t *testing.T) {
-	db := createTempPostgresTestDB(t)
-	var exists bool
-	if err := db.Raw(`
-SELECT EXISTS (
-SELECT 1
-FROM information_schema.tables
-WHERE table_schema = 'public'
-AND table_name = 'deposits'
-)
-`).Scan(&exists).Error; err != nil {
-		t.Fatalf("check deposits table exists: %v", err)
-	}
-	if !exists {
-		t.Fatalf("expected deposits table to exist after migration")
-	}
-}
 
 type creditNextSeedData struct {
 	UserID           int64
@@ -225,7 +87,7 @@ func seedCreditableDepositData(t *testing.T, db *gorm.DB) creditNextSeedData {
 }
 
 func TestSeedCreditableDepositData(t *testing.T) {
-	db := createTempPostgresTestDB(t)
+	db := testutil.CreateTempPostgresTestDB(t)
 	seed := seedCreditableDepositData(t, db)
 
 	var user model.User
@@ -323,7 +185,7 @@ func queryDeposit(t *testing.T, db *gorm.DB, depositID int64) model.Deposit {
 
 func TestDepositCreditService_CreditNext_WithTestDB_CreditDeposit(t *testing.T) {
 	ctx := context.Background()
-	db := createTempPostgresTestDB(t)
+	db := testutil.CreateTempPostgresTestDB(t)
 	seed := seedCreditableDepositData(t, db)
 	svc := newTestDepositCreditService(t, db)
 	credited, err := svc.CreditNext(ctx, seed.ChainID)
@@ -374,7 +236,7 @@ func TestDepositCreditService_CreditNext_WithTestDB_CreditDeposit(t *testing.T) 
 
 func TestDepositCreditService_CreditNext_WithTestDB_SecondCallDoesNotCreditAgain(t *testing.T) {
 	ctx := context.Background()
-	db := createTempPostgresTestDB(t)
+	db := testutil.CreateTempPostgresTestDB(t)
 	seed := seedCreditableDepositData(t, db)
 	svc := newTestDepositCreditService(t, db)
 	credited, err := svc.CreditNext(ctx, seed.ChainID)
@@ -415,7 +277,7 @@ func TestDepositCreditService_CreditNext_WithTestDB_SecondCallDoesNotCreditAgain
 
 func TestDepositCreditService_CreditNext_WithTestDB_WhenNoCreditableDeposit_ReturnsFalse(t *testing.T) {
 	ctx := context.Background()
-	db := createTempPostgresTestDB(t)
+	db := testutil.CreateTempPostgresTestDB(t)
 	svc := newTestDepositCreditService(t, db)
 	const chainID int64 = 11155111
 	credited, err := svc.CreditNext(ctx, chainID)
@@ -429,7 +291,7 @@ func TestDepositCreditService_CreditNext_WithTestDB_WhenNoCreditableDeposit_Retu
 
 func TestDepositCreditService_CreditNext_WithTestDB_WhenLedgerAlreadyExists_ReturnsErrorAndDoesNotChangeBalance(t *testing.T) {
 	ctx := context.Background()
-	db := createTempPostgresTestDB(t)
+	db := testutil.CreateTempPostgresTestDB(t)
 	seed := seedCreditableDepositData(t, db)
 	existingLedger := &model.BalanceLedger{
 		UserID:      seed.UserID,
@@ -481,7 +343,7 @@ func TestDepositCreditService_CreditNext_WithTestDB_WhenLedgerAlreadyExists_Retu
 func TestDepositCreditService_CreditNext_WithTestDB_WhenBalanceAccountMissing_CreatesAccountAndCreditsDeposit(t *testing.T) {
 	ctx := context.Background()
 
-	db := createTempPostgresTestDB(t)
+	db := testutil.CreateTempPostgresTestDB(t)
 	seed := seedCreditableDepositData(t, db)
 
 	result := db.
@@ -570,7 +432,7 @@ func (r *failingDepositCreditTransactionRunner) WithinTransaction(
 func TestDepositCreditService_CreditNext_WithTestDB_WhenMarkDepositCreditedFails_RollsBackLedgerAndBalance(t *testing.T) {
 	ctx := context.Background()
 
-	db := createTempPostgresTestDB(t)
+	db := testutil.CreateTempPostgresTestDB(t)
 	seed := seedCreditableDepositData(t, db)
 
 	markErr := errors.New("mark deposit credited failed")
