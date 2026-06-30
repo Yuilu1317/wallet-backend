@@ -12,9 +12,7 @@ import (
 )
 
 func main() {
-	if err := godotenv.Load(); err != nil {
-		log.Printf("load .env skipped: %v", err)
-	}
+	_ = godotenv.Load()
 
 	configPath := os.Getenv("CONFIG_PATH")
 	if configPath == "" {

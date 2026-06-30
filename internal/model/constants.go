@@ -6,6 +6,11 @@ const (
 )
 
 const (
+	UserStatusActive   = "active"
+	UserStatusDisabled = "disabled"
+)
+
+const (
 	DepositStatusConfirming = "confirming"
 	DepositStatusCredited   = "credited"
 	DepositStatusFailed     = "failed"

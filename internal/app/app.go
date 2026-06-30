@@ -249,13 +249,13 @@ func (a *App) Close() error {
 	return nil
 }
 
-func (a *App) waitWorkerRunners(ctx context.Context) error {
+func (a *App) waitWorkerRunners(waitCtx context.Context) error {
 	for _, runner := range a.workerRunners {
 		if runner == nil {
 			continue
 		}
 
-		if err := runner.Wait(ctx); err != nil {
+		if err := runner.Wait(waitCtx); err != nil {
 			return err
 		}
 	}

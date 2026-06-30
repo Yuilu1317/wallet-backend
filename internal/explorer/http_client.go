@@ -40,8 +40,6 @@ func NewHTTPClient(baseURL string, timeout time.Duration) (*HTTPClient, error) {
 	}, nil
 }
 
-const SyncStatusPath = "/internal/wallet/sync-status"
-
 func (c *HTTPClient) GetSyncStatus(
 	ctx context.Context,
 	chainID int64,
@@ -65,7 +63,9 @@ func (c *HTTPClient) GetSyncStatus(
 	if err != nil {
 		return nil, fmt.Errorf("request sync status: chain_id=%d: %w", chainID, err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		_ = resp.Body.Close()
+	}()
 
 	if err := checkResponseStatus(resp); err != nil {
 		return nil, fmt.Errorf("check sync status block status: %w", err)
@@ -94,6 +94,8 @@ func (c *HTTPClient) GetSyncStatus(
 	return &out, nil
 }
 
+const SyncStatusPath = "/internal/wallet/sync-status"
+
 func (c *HTTPClient) buildSyncStatusURL(chainID int64) (string, error) {
 	endpoint, err := url.Parse(c.baseURL + SyncStatusPath)
 	if err != nil {
@@ -106,8 +108,6 @@ func (c *HTTPClient) buildSyncStatusURL(chainID int64) (string, error) {
 
 	return endpoint.String(), nil
 }
-
-const completedBlocksPath = "/internal/wallet/completed-blocks"
 
 func (c *HTTPClient) ListCompletedBlocks(
 	ctx context.Context,
@@ -138,7 +138,9 @@ func (c *HTTPClient) ListCompletedBlocks(
 			req.Limit,
 			err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		_ = resp.Body.Close()
+	}()
 
 	if err := checkResponseStatus(resp); err != nil {
 		return nil, fmt.Errorf("check completed blocks status: %w", err)
@@ -171,6 +173,8 @@ func validateListCompletedBlocksRequest(req ListCompletedBlocksRequest) error {
 
 	return nil
 }
+
+const completedBlocksPath = "/internal/wallet/completed-blocks"
 
 func (c *HTTPClient) buildCompletedBlocksURL(req ListCompletedBlocksRequest) (string, error) {
 	endpoint, err := url.Parse(c.baseURL + completedBlocksPath)

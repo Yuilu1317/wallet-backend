@@ -9,53 +9,53 @@ import (
 )
 
 type Config struct {
-	App      AppConfig      `yaml:"app"`
-	Database DatabaseConfig `yaml:"database"`
-	Ethereum EthereumConfig `yaml:"ethereum"`
-	Scanner  ScannerConfig  `yaml:"scanner"`
-	Explorer ExplorerConfig `yaml:"explorer"`
-	Worker   WorkerConfig   `yaml:"worker"`
+	App      AppConfig      `mapstructure:"app" yaml:"app"`
+	Database DatabaseConfig `mapstructure:"database" yaml:"database"`
+	Ethereum EthereumConfig `mapstructure:"ethereum" yaml:"ethereum"`
+	Scanner  ScannerConfig  `mapstructure:"scanner" yaml:"scanner"`
+	Explorer ExplorerConfig `mapstructure:"explorer" yaml:"explorer"`
+	Worker   WorkerConfig   `mapstructure:"worker" yaml:"worker"`
 }
 
 type AppConfig struct {
-	Env      string `yaml:"env"`
-	HTTPPort string `yaml:"http_port"`
+	Env      string `mapstructure:"env" yaml:"env"`
+	HTTPPort string `mapstructure:"http_port" yaml:"http_port"`
 }
 
 type DatabaseConfig struct {
-	DSN              string `yaml:"dsn"`
-	DBTimeoutSeconds int    `yaml:"db_timeout_seconds"`
+	DSN              string `mapstructure:"dsn" yaml:"dsn"`
+	DBTimeoutSeconds int    `mapstructure:"db_timeout_seconds" yaml:"db_timeout_seconds"`
 }
 
 type EthereumConfig struct {
-	ChainID           int64  `yaml:"chain_id"`
-	ConfirmationDepth int64  `yaml:"confirmation_depth"`
-	MinDepositWei     string `yaml:"min_deposit_wei"`
+	ChainID           int64  `mapstructure:"chain_id" yaml:"chain_id"`
+	ConfirmationDepth int64  `mapstructure:"confirmation_depth" yaml:"confirmation_depth"`
+	MinDepositWei     string `mapstructure:"min_deposit_wei" yaml:"min_deposit_wei"`
 }
 
 type ScannerConfig struct {
-	Name       string `yaml:"name"`
-	StartBlock int64  `yaml:"start_block"`
-	BatchSize  int    `yaml:"batch_size"`
+	Name       string `mapstructure:"name" yaml:"name"`
+	StartBlock int64  `mapstructure:"start_block" yaml:"start_block"`
+	BatchSize  int    `mapstructure:"batch_size" yaml:"batch_size"`
 }
 
 type ExplorerConfig struct {
-	BaseURL        string `yaml:"base_url"`
-	TimeoutSeconds int    `yaml:"timeout_seconds"`
+	BaseURL        string `mapstructure:"base_url" yaml:"base_url"`
+	TimeoutSeconds int    `mapstructure:"timeout_seconds" yaml:"timeout_seconds"`
 }
 
 type WorkerConfig struct {
-	IntervalSeconds              int `yaml:"interval_seconds"`
-	ScannerRunOnceTimeoutSeconds int `yaml:"scanner_run_once_timeout_seconds"`
-	CreditRunOnceTimeoutSeconds  int `yaml:"credit_run_once_timeout_seconds"`
+	IntervalSeconds              int `mapstructure:"interval_seconds" yaml:"interval_seconds"`
+	ScannerRunOnceTimeoutSeconds int `mapstructure:"scanner_run_once_timeout_seconds" yaml:"scanner_run_once_timeout_seconds"`
+	CreditRunOnceTimeoutSeconds  int `mapstructure:"credit_run_once_timeout_seconds" yaml:"credit_run_once_timeout_seconds"`
 }
 
-func Load(path string) (*Config, error) {
-	if strings.TrimSpace(path) == "" {
+func Load(configPath string) (*Config, error) {
+	if strings.TrimSpace(configPath) == "" {
 		return nil, fmt.Errorf("config path is required")
 	}
 
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(configPath)
 	if err != nil {
 		return nil, fmt.Errorf("read config file: %w", err)
 	}
