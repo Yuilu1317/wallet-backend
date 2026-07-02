@@ -18,9 +18,6 @@ func NewDepositRepo(db *gorm.DB) *DepositRepo {
 	return &DepositRepo{db: db}
 }
 
-// CreateConfirmingDepositIdempotently inserts a confirming deposit once.
-// The idempotency key is chain_id + tx_hash. If the deposit already exists,
-// it returns created=false and nil error.
 func (r *DepositRepo) CreateConfirmingDepositIdempotently(
 	ctx context.Context,
 	deposit *model.Deposit,
@@ -28,11 +25,21 @@ func (r *DepositRepo) CreateConfirmingDepositIdempotently(
 	if deposit == nil {
 		return false, fmt.Errorf("deposit is required")
 	}
-
-	if deposit.Status == "" {
-		deposit.Status = model.DepositStatusConfirming
+	if deposit.ChainID <= 0 {
+		return false, fmt.Errorf("deposit chain_id must be positive")
 	}
-
+	if deposit.UserID <= 0 {
+		return false, fmt.Errorf("deposit user_id must be positive")
+	}
+	if deposit.DepositAddressID <= 0 {
+		return false, fmt.Errorf("deposit deposit_address_id must be positive")
+	}
+	if deposit.TxHash == "" {
+		return false, fmt.Errorf("deposit tx_hash must not be empty")
+	}
+	if deposit.AmountWei == "" {
+		return false, fmt.Errorf("deposit amount_wei must not be empty")
+	}
 	if deposit.Status != model.DepositStatusConfirming {
 		return false, fmt.Errorf("deposit status must be confirming")
 	}
@@ -46,7 +53,6 @@ func (r *DepositRepo) CreateConfirmingDepositIdempotently(
 			DoNothing: true,
 		}).
 		Create(deposit)
-
 	if result.Error != nil {
 		if mapped := mapDBError(result.Error); mapped != nil {
 			return false, fmt.Errorf("create confirming deposit idempotently: %w", mapped)
@@ -56,12 +62,11 @@ func (r *DepositRepo) CreateConfirmingDepositIdempotently(
 	if result.RowsAffected == 1 {
 		return true, nil
 	}
-
 	if result.RowsAffected == 0 {
 		return false, nil
 	}
-
-	return false, fmt.Errorf("create deposit credit ledger idempotently: unexpected rows affected: %d", result.RowsAffected)
+	return false, fmt.Errorf("create confirming deposit idempotently:unexpected rows affected: %d",
+		result.RowsAffected)
 }
 
 func (r *DepositRepo) LockNextCreditableDeposit(ctx context.Context, chainID int64) (*model.Deposit, bool, error) {

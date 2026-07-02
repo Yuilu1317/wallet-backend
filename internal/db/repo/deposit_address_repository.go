@@ -17,25 +17,22 @@ func NewDepositAddressRepo(db *gorm.DB) *DepositAddressRepo {
 	return &DepositAddressRepo{db: db}
 }
 
-// FindActiveByChainIDAndAddressLower finds an active deposit address by chain ID
-// and normalized lowercase address.
-//
-// Returning found=false is not an error. Most chain transactions are unrelated
-// to platform deposit addresses, so the scanner should skip them when no active
-// address is found.
 func (r *DepositAddressRepo) FindActiveByChainIDAndAddressLower(
 	ctx context.Context,
 	chainID int64,
 	addressLower string,
 ) (*model.DepositAddress, bool, error) {
-	var address model.DepositAddress
+	if chainID <= 0 {
+		return nil, false, fmt.Errorf("chain_id must be positive")
+	}
+	if addressLower == "" {
+		return nil, false, fmt.Errorf("lower-case address must not be empty")
+	}
 
+	var depositAddress model.DepositAddress
 	if err := r.db.WithContext(ctx).
-		Where("chain_id = ?", chainID).
-		Where("address_lower = ?", addressLower).
-		Where("status = ?", model.DepositAddressStatusActive).
-		Take(&address).
-		Error; err != nil {
+		Where("chain_id = ? AND address_lower = ? AND status = ?", chainID, addressLower, model.DepositAddressStatusActive).
+		Take(&depositAddress).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, false, nil
 		}
@@ -44,5 +41,5 @@ func (r *DepositAddressRepo) FindActiveByChainIDAndAddressLower(
 		}
 		return nil, false, fmt.Errorf("find active deposit address: %w", err)
 	}
-	return &address, true, nil
+	return &depositAddress, true, nil
 }

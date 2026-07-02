@@ -114,7 +114,7 @@ CREATE TABLE wallet_scanner_cursors
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
 
-    CONSTRAINT wallet_scanner_cursors_chain_id_check CHECK ( chain_id > 0 ),
+    CONSTRAINT wallet_scanner_cursors_chain_id_positive_check CHECK ( chain_id > 0 ),
     CONSTRAINT wallet_scanner_cursors_last_sync_block_number_check CHECK ( last_scanned_block_number >= 0 ),
     CONSTRAINT wallet_scanner_cursors_scanner_name_not_empty_check CHECK ( length(trim(scanner_name)) > 0 ),
     CONSTRAINT wallet_scanner_cursors_last_sync_block_hash_not_empty_check CHECK ( length(trim(last_scanned_block_hash)) > 0 )

@@ -2,6 +2,7 @@ package testutil
 
 import (
 	"fmt"
+	"log"
 	"net/url"
 	"os"
 	"strings"
@@ -11,6 +12,7 @@ import (
 	"github.com/joho/godotenv"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
+	"gorm.io/gorm/logger"
 )
 
 func replacePostgresDSNDatabase(t *testing.T, dsn string, dbName string) string {
@@ -92,7 +94,18 @@ func CreateTempPostgresTestDB(t *testing.T) *gorm.DB {
 
 	testDSN := replacePostgresDSNDatabase(t, adminDSN, testDBName)
 
-	testDB, err := gorm.Open(postgres.Open(testDSN), &gorm.Config{})
+	gormLogger := logger.New(
+		log.New(os.Stdout, "\r\n", log.LstdFlags),
+		logger.Config{
+			SlowThreshold:             200 * time.Millisecond,
+			LogLevel:                  logger.Warn,
+			IgnoreRecordNotFoundError: true,
+			Colorful:                  true,
+		},
+	)
+	testDB, err := gorm.Open(postgres.Open(testDSN), &gorm.Config{
+		Logger: gormLogger,
+	})
 	if err != nil {
 		t.Fatalf("open test db: %v", err)
 	}
